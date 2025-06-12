@@ -1018,6 +1018,7 @@ class ServerArgs:
                 "torch_native",
                 "fa3",
                 "flashmla",
+                "ascendmla",
                 "cutlass_mla",
                 "intel_amx",
             ],
