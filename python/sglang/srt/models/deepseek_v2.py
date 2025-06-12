@@ -2105,6 +2105,9 @@ class DeepseekV2ForCausalLM(nn.Module):
 
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "weight_offset" in name:
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:

@@ -357,6 +357,7 @@ class ModelRunner:
                     "fa3",
                     "triton",
                     "flashmla",
+                    "ascendmla",
                     "cutlass_mla",
                 ]:
                     logger.info(
@@ -1054,6 +1055,10 @@ class ModelRunner:
             from sglang.srt.layers.attention.flashmla_backend import FlashMLABackend
 
             return FlashMLABackend(self)
+        elif self.server_args.attention_backend == "ascendmla":
+            from sglang.srt.layers.attention.ascendmla_backend import AscendMLABackend
+
+            return AscendMLABackend(self)
         elif self.server_args.attention_backend == "fa3":
             assert (
                 torch.cuda.get_device_capability()[0] == 8 and not self.use_mla_backend
