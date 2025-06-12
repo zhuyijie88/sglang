@@ -797,7 +797,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 forward_batch.forward_mode.is_extend()
                 and not forward_batch.forward_mode.is_target_verify()
                 and not forward_batch.forward_mode.is_draft_extend()
-                and sum(forward_batch.extend_prefix_lens_cpu) == 0
+                # and sum(forward_batch.extend_prefix_lens_cpu) == 0
             ):
                 return AttnForwardMethod.MHA
             else:
@@ -1017,11 +1017,7 @@ class DeepseekV2AttentionMLA(nn.Module):
     def forward_absorb_core(
         self, q_pe, k_pe, q_nope_out, k_nope, forward_batch, zero_allocator
     ):
-        if (
-            self.attention_backend == "fa3"
-            or self.attention_backend == "flashinfer"
-            or self.attention_backend == "cutlass_mla"
-        ):
+        if self.attention_backend in ["fa3", "flashinfer", "cutlass_mla", "npumla"]:
             attn_output = self.attn_mqa(
                 q_nope_out, k_nope, k_nope, forward_batch, q_rope=q_pe, k_rope=k_pe
             )
@@ -2084,6 +2080,9 @@ class DeepseekV2ForCausalLM(nn.Module):
 
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "weight_offset" in name:
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
