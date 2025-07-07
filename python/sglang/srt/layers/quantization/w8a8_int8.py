@@ -11,11 +11,24 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
-from sglang.srt.utils import is_cuda, set_weight_attrs
+from sglang.srt.utils import (
+    _process_weight_after_loading,
+    cpu_has_amx_support,
+    is_cpu,
+    is_cuda,
+    is_npu,
+    set_weight_attrs,
+)
 
 _is_cuda = is_cuda()
+_is_cpu_amx_available = cpu_has_amx_support()
+_is_cpu = is_cpu()
+_is_npu = is_npu()
 if _is_cuda:
     from sgl_kernel import int8_scaled_mm
+
+if _is_npu:
+    import torch_npu
 
 
 class W8A8Int8Config(QuantizationConfig):
@@ -68,10 +81,20 @@ class W8A8Int8Config(QuantizationConfig):
 
 class W8A8Int8LinearMethod(LinearMethodBase):
 
-    def __init__(self, quantization_config: W8A8Int8Config):
-        self.quantization_config = quantization_config
+    def __init__(self, quantization_config: W8A8Int8Config = None):
+        if quantization_config is None:
+            self.quantization_config = W8A8Int8Config()
+        else:
+            self.quantization_config = quantization_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if _is_cpu:
+            assert (
+                _is_cpu_amx_available
+            ), "W8A8Int8LinearMethod on CPU requires that CPU has AMX support"
+            _process_weight_after_loading(layer, ["weight"])
+            return
+
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -112,11 +135,37 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
-        x_q, x_scale = per_token_quant_int8(x)
-
-        return int8_scaled_mm(
-            x_q, layer.weight, x_scale, layer.weight_scale, out_dtype=x.dtype, bias=bias
-        )
+        if getattr(layer, "use_intel_amx_backend", False):
+            return torch.ops.sgl_kernel.int8_scaled_mm_with_quant(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                bias,
+                x.dtype,
+                True,  # is_vnni
+            )
+        
+        if _is_npu:
+            x_q, x_scale = torch_npu.npu_dynamic_quant(x)
+            out = torch_npu.npu_quant_matmul(
+                x_q,
+                layer.weight,
+                layer.weight_scale.view(-1),
+                pertoken_scale=x_scale.view(-1),
+                bias=bias,
+                output_dtype=x.dtype,
+            )
+        else:
+            x_q, x_scale = per_token_quant_int8(x)
+            out = int8_scaled_mm(
+                x_q,
+                layer.weight,
+                x_scale,
+                layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=bias,
+            )
+        return out
 
 
 class W8A8Int8MoEMethod:
@@ -206,6 +255,13 @@ class W8A8Int8MoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if _is_cpu:
+            assert (
+                _is_cpu_amx_available
+            ), "W8A8Int8MoEMethod on CPU requires that CPU has AMX support"
+            _process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
+            return
+
         layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
         layer.w13_weight_scale = Parameter(
@@ -251,6 +307,24 @@ class W8A8Int8MoEMethod:
             correction_bias=correction_bias,
             routed_scaling_factor=routed_scaling_factor,
         )
+
+        if getattr(layer, "use_intel_amx_backend", False):
+            return torch.ops.sgl_kernel.fused_experts_cpu(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                False,  # inplace See [Note] inplace should be False in fused_experts.
+                True,  # use_int8_w8a8
+                False,  # use_fp8_w8a16
+                layer.w13_weight_scale,  # w1_scale
+                layer.w2_weight_scale,  # w2_scale
+                None,  # block_size
+                layer.w13_input_scale,  # a1_scale
+                layer.w2_input_scale,  # a2_scale
+                True,  # is_vnni
+            )
 
         return fused_experts(
             x,

@@ -40,6 +40,7 @@ import threading
 import time
 import traceback
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from enum import Enum
 from functools import lru_cache
@@ -1544,11 +1545,13 @@ def get_compiler_backend() -> str:
             import torchair
             import torchair.ge_concrete_graph.ge_converter.experimental.patch_for_hcom_allreduce
             from torchair.configs.compiler_config import CompilerConfig
+            from torchair import patch_for_hcom
+            patch_for_hcom()
         except ImportError as e:
             raise ImportError(
                 "NPU detected, but torchair package is not installed. "
                 "Please install torchair for torch.compile support on NPU."
-            )
+            ) from e
         compiler_config = CompilerConfig()
         predefined_config = get_npu_compiler_config()
         for k, v in predefined_config.items():
@@ -1924,13 +1927,6 @@ def rank0_log(msg: str):
         logger.info(msg)
 
 
-def rank0_print(msg: str):
-    from sglang.srt.distributed import get_tensor_model_parallel_rank
-
-    if get_tensor_model_parallel_rank() == 0:
-        print(msg, flush=True)
-
-
 def get_cuda_version():
     if torch.version.cuda:
         return tuple(map(int, torch.version.cuda.split(".")))
@@ -2303,43 +2299,49 @@ class Withable(Generic[T]):
             self._value = None
 
 
-def merge_bias_tensor(
-    lhs: Optional[torch.Tensor],
-    rhs: Optional[torch.Tensor],
-    bs1: int,
-    bs2: int,
-    device: str,
-    default: float,
-):
-    """Merge two bias tensors for batch merging.
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
-        bs1: Batch size of left-hand side tensor
-        bs2: Batch size of right-hand side tensor
-        device: Device to place the merged tensor on
-        default: Default value for missing tensor elements
-
-    Returns:
-        Merged tensor or None if both inputs are None
+def require_mlp_tp_gather(server_args):
     """
-    if lhs is None and rhs is None:
-        return None
-
-    if lhs is not None and rhs is not None:
-        return torch.cat([lhs, rhs])
-    else:
-        if lhs is not None:
-            shape, dtype = lhs.shape[1:], lhs.dtype
+    Check if the input of MLP is obtained by all-gather rather than all-reduce. This only happens when each MLP TP group contains multiple attention DP groups.
+    """
+    if server_args.enable_dp_attention:
+        assert server_args.dp_size > 1, "dp_size must be greater than 1"
+        if (
+            server_args.moe_dense_tp_size is None
+        ):  # TODO(ch-wan): some MoE models do not have dense layers
+            return True
+        elif not server_args.enable_dp_lm_head:
+            return True
+        elif not server_args.enable_deepep_moe:
+            return True
         else:
-            shape, dtype = rhs.shape[1:], rhs.dtype
+            return (
+                server_args.moe_dense_tp_size
+                > server_args.tp_size // server_args.dp_size
+            )
+    else:
+        return False
 
-        if lhs is None:
-            lhs = torch.empty((bs1, *shape), device=device, dtype=dtype).fill_(default)
-        if rhs is None:
-            rhs = torch.empty((bs2, *shape), device=device, dtype=dtype).fill_(default)
-        return torch.cat([lhs, rhs])
+
+def require_attn_tp_gather(server_args):
+    """
+    Check if the input of attention is scattered.
+    """
+    assert server_args.moe_dense_tp_size in [1, None]
+    if server_args.enable_deepep_moe or server_args.moe_dense_tp_size == 1:
+        if server_args.enable_dp_attention:
+            return server_args.dp_size < server_args.tp_size
+        else:
+            return True
+    else:
+        return False
+
+
+def require_gathered_buffer(server_args):
+    return require_mlp_tp_gather(server_args) or require_attn_tp_gather(server_args)
+
+
+def require_mlp_sync(server_args):
+    return server_args.enable_dp_attention or require_gathered_buffer(server_args)
 
 
 def find_local_repo_dir(repo_id: str, revision: Optional[str] = None) -> Optional[str]:
@@ -2398,8 +2400,8 @@ def bind_or_assign(target, source):
         return source
 
 
-def support_triton(backend: str) -> bool:
-    return backend not in ["torch_native", "intel_amx"]
+def support_triton(attn_backend: str) -> bool:
+    return attn_backend not in ["torch_native", "intel_amx", "npumla"]
 
 
 try:
@@ -2414,6 +2416,77 @@ except:
 
 def cpu_has_amx_support():
     return torch._C._cpu._is_amx_tile_supported() and is_intel_amx_backend_available
+
+
+def prepack_weight_if_needed(weight):
+    if weight.device != torch.device("cpu"):
+        return weight
+    if not cpu_has_amx_support():
+        return weight
+
+    return torch.ops.sgl_kernel.convert_weight_packed(weight)
+
+
+# TODO: currently gemm kernel has the below requirements:
+# OC % TILE_N == 0, where TILE_N = 16
+# IC % TILE_K == 0, where TILE_K = 32
+def dim_is_supported(weight):
+    return weight.size(0) % 16 == 0 and weight.size(1) % 32 == 0
+
+
+def _process_weight_after_loading(module, weight_names, transpose_dims=None) -> None:
+    # Pack weight for get better performance on CPU
+    devices = {getattr(module, weight_name).device for weight_name in weight_names}
+    assert len(devices) == 1, f"Expects all weights to be on the same device"
+    device = devices.pop()
+
+    if transpose_dims:
+        assert len(weight_names) == len(
+            transpose_dims
+        ), "len(weight_names) should be equal to len(transpose_dims)"
+
+    for i, weight_name in enumerate(weight_names):
+        weight_tensor = getattr(module, weight_name)
+
+        # We don't pack weight or use intel amx backend if any weight of this module has unsupported dim.
+        if not dim_is_supported(weight_tensor):
+            logger.warning(
+                f"Expects weight.size(0) % 16 == 0 and weight.size(1) % 32 == 0 "
+                f"but {weight_tensor.size(0)=} and {weight_tensor.size(1)=} in {module}. "
+                f"{module} won't use intel amx backend."
+            )
+            module.use_intel_amx_backend = False
+            return
+
+        if transpose_dims and transpose_dims[i]:
+            weight_tensor = weight_tensor.transpose(*transpose_dims[i])
+
+        packed_weight = torch.nn.Parameter(
+            prepack_weight_if_needed(weight_tensor),
+            requires_grad=False,
+        )
+        packed_weight.__dict__ = weight_tensor.__dict__
+        setattr(module, weight_name, packed_weight)
+
+    module.use_intel_amx_backend = (
+        device == torch.device("cpu") and cpu_has_amx_support()
+    )
+
+    if (
+        module.use_intel_amx_backend
+        and hasattr(module, "bias")
+        and module.bias is not None
+    ):
+        module.bias = torch.nn.Parameter(module.bias.data.float(), requires_grad=False)
+
+
+class PackWeightMethod:
+    def __init__(self, weight_names, transpose_dims=None):
+        self.weight_names = weight_names
+        self.transpose_dims = transpose_dims
+
+    def process_weights_after_loading(self, module) -> None:
+        _process_weight_after_loading(module, self.weight_names, self.transpose_dims)
 
 
 class LazyValue:
@@ -2440,3 +2513,113 @@ def dynamic_import(func_path: str):
     module = importlib.import_module(module_path)
     func = getattr(module, func_name)
     return func
+
+
+def configure_gc_logger():
+    logger.info("Enable GC Logger")
+
+    import gc
+
+    gc_start_time = {}
+
+    def gc_callback(phase, info):
+        gen = info.get("generation", "?")
+        if phase == "start":
+            gc_start_time[gen] = time.time()
+            logger.info(f"GC start: Time {time.time()} | Generation {gen}")
+        elif phase == "stop":
+            duration = time.time() - gc_start_time.get(gen, time.time())
+            collected = info.get("collected", "?")
+            uncollectable = info.get("uncollectable", "?")
+            logger.info(
+                f"GC end: Time {time.time()} | Generation {gen} | "
+                f"Duration: {duration:.4f}s | Collected: {collected} | Uncollectable: {uncollectable} "
+                f'{"(LONG GC)" if duration > 0.1 else ""}'
+            )
+
+    gc.callbacks.append(gc_callback)
+
+
+# COPIED FROM DeepGEMM
+def align(x: int, y: int) -> int:
+    return ceil_div(x, y) * y
+
+
+# COPIED FROM DeepGEMM
+def ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
+def parse_lscpu_topology():
+    try:
+        # Get CPU topology: CPU,Core,Socket,Node
+        output = subprocess.check_output(
+            ["lscpu", "-p=CPU,Core,Socket,Node"], text=True
+        )
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error running 'lscpu': {e}")
+
+    # Parse only data lines (skip comments)
+    cpu_info = []
+    for line in output.splitlines():
+        if not line.startswith("#"):
+            cpu, core, socket, node = map(int, line.strip().split(","))
+            cpu_info.append((cpu, core, socket, node))
+
+    # [(0,0,0,0),(1,1,0,0),...,(43,43,0,1),...,(256,0,0,0),...]
+    return cpu_info
+
+
+def get_physical_cpus_by_numa():
+    cpu_info = parse_lscpu_topology()
+
+    # Map NUMA node -> set of (core_id, socket) to avoid duplicates
+    # 0: {(0,0): 0, (1, 0): 1,...}
+    # ...
+    # 5: {(214,1): 214, (215,1): 215}
+    physical_by_node = defaultdict(dict)  # node -> core_id -> cpu_id
+
+    for cpu, core, socket, node in cpu_info:
+        key = (core, socket)
+        if key not in physical_by_node[node]:
+            physical_by_node[node][
+                key
+            ] = cpu  # pick first CPU seen for that physical core
+
+    # Retrieves CPUs that the current process is allowed to run on
+    cpus_allowed_list = psutil.Process().cpu_affinity()
+
+    # Convert to list of physical CPUs per node
+    # 0: [0,1,2,...,42]
+    # ...
+    # 2: [86,87,...,127]
+    # ...
+    # 5: [214,215,...,255]
+    node_to_cpus = {}
+    for node, core_to_cpu in physical_by_node.items():
+        cpus = sorted(core_to_cpu.values())
+        allowed_cpus = set(cpus).intersection(cpus_allowed_list)
+        node_to_cpus[node] = allowed_cpus
+
+    return node_to_cpus
+
+
+# Only physical cores are used. Logical cores are excluded.
+def get_cpu_ids_by_node():
+    node_to_cpus = get_physical_cpus_by_numa()
+    # Sort by NUMA node index
+    cpu_ids = [
+        ",".join(map(str, sorted(node_to_cpus[node]))) for node in sorted(node_to_cpus)
+    ]
+
+    # ['0,1,2,3', '4,5,6,7', '8,9,10,11', '12,13,14,15', '16,17,18,19', '20,21,22,23']
+    return cpu_ids
+
+
+def is_shm_available(dtype, world_size, local_size):
+    return (
+        cpu_has_amx_support()
+        and dtype in [torch.bfloat16, torch.float]
+        and world_size >= 1
+        and world_size == local_size
+    )
