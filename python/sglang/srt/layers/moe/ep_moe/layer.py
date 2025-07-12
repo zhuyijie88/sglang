@@ -1414,19 +1414,10 @@ class NpuDeepEPMoE(DeepEPMoE):
             "npu", use_flashinfer=False,
         )
 
-        epsilon = 1e-2
-        self.out_2_scale = torch.nn.Parameter(
-            torch.rand(size=(self.n_routed_experts_per_rank, self.w2_weight.size(1)),
-                       dtype=torch.bfloat16) * (1 - epsilon) + epsilon
-        )
-        self.weight_scale = torch.nn.Parameter(
-            torch.rand(size=(self.n_routed_experts_per_rank, self.w13_weight.size(1)),
-                       dtype=torch.float) * (1 - epsilon) + epsilon
-        )
         self.quant_scale = torch.nn.Parameter(
-            torch.rand(size=(self.n_routed_experts_per_rank, self.w2_weight.size(-1)),
-                       dtype=torch.float) * (1 - epsilon) + epsilon
-        )
+            torch.ones(size=(self.n_routed_experts_per_rank, self.w2_weight.size(-1)),
+                       dtype=torch.float)
+        ) # smooth scale, now dpsk use smooth_scale == 1
 
         assert self.quant_method is not None
 
@@ -1459,11 +1450,11 @@ class NpuDeepEPMoE(DeepEPMoE):
         if self.activation == "silu":
             down_input, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
                 gateup_output,
-                weight_scale=self.weight_scale,
+                weight_scale=self.w13_weight_scale.squeeze(-1),
                 activation_scale=dynamic_scale,
                 quant_scale=self.quant_scale,
                 group_index=expert_tokens,
-                activate_left=False,
+                activate_left=True,
                 quant_mode=1,
             )
         else:
@@ -1483,7 +1474,7 @@ class NpuDeepEPMoE(DeepEPMoE):
             c=None,
             c_dtype=torch.bfloat16,
             scale_a=dynamic_scale,
-            scale_b=self.out_2_scale,
+            scale_b=self.w2_weight_scale.squeeze(-1).to(torch.bfloat16),
             n_routed_experts_per_rank=self.n_routed_experts_per_rank,
             expert_tokens=expert_tokens
         )
