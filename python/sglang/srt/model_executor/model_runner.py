@@ -1632,7 +1632,8 @@ class ModelRunner:
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
         can_run_graph = bool(
-            self.device_graph_runner and self.device_graph_runner.can_run(forward_batch)
+            self.device_graph_runner
+            and self.device_graph_runner.can_run_graph(forward_batch)
         )
         if can_run_graph:
             with self.device_graph_runner.get_runner_context(
