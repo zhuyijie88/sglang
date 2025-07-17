@@ -56,7 +56,11 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class, NpuDeepEPMoE
+from sglang.srt.layers.moe.ep_moe.layer import (
+    DeepEPMoE,
+    NpuDeepEPMoE,
+    get_moe_impl_class,
+)
 from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import TopK, select_experts, npu_topk
 from sglang.srt.layers.quantization import deep_gemm_wrapper
@@ -104,7 +108,6 @@ from sglang.srt.utils import (
     is_cuda,
     is_flashinfer_available,
     is_hip,
-    is_npu,
     is_non_idle_and_non_empty,
     is_npu,
     log_info_on_rank0,
@@ -634,13 +637,17 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def forward_deepep_npu(
-            self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
+        self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         pad_size = None
         if forward_batch.forward_mode.is_extend():
-            pad_size = (forward_batch.seq_lens_sum // get_attention_tp_size() + 1) - hidden_states.size(0)
+            pad_size = (
+                forward_batch.seq_lens_sum // get_attention_tp_size() + 1
+            ) - hidden_states.size(0)
         else:
-            pad_size = (forward_batch.batch_size // get_attention_tp_size() + 1) - hidden_states.size(0)
+            pad_size = (
+                forward_batch.batch_size // get_attention_tp_size() + 1
+            ) - hidden_states.size(0)
         hidden_states = F.pad(hidden_states, [0, 0, 0, pad_size], "constant", 0)
         forward_mode = forward_batch.forward_mode
         shared_output = None
@@ -663,8 +670,8 @@ class DeepseekV2MoE(nn.Module):
                 expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
                     layer_id=self.layer_id,
                 ),
-                custom_routing_function=npu_topk, # npu customized top_k function
-                n_routed_experts=self.n_routed_experts
+                custom_routing_function=npu_topk,  # npu customized top_k function
+                n_routed_experts=self.n_routed_experts,
             )
         else:
             topk_idx = torch.full(
@@ -1424,6 +1431,20 @@ class DeepseekV2AttentionMLA(nn.Module):
                 torch.bfloat16,
             )
             attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        elif _is_npu:
+            attn_bmm_output = torch.empty(
+                (self.num_local_heads, attn_output.shape[0], self.v_head_dim),
+                dtype=attn_output.dtype,
+                device=attn_output.device,
+            )
+            torch.bmm(
+                attn_output.transpose(0, 1),
+                self.w_vc,
+                out=attn_bmm_output,
+            )
+            attn_bmm_output = attn_bmm_output.transpose(0, 1).reshape(
+                -1, self.num_local_heads * self.v_head_dim
+            )
         else:
             attn_bmm_output = torch.empty(
                 (attn_output.shape[0], self.num_local_heads * self.v_head_dim),
