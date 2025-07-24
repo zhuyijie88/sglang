@@ -147,6 +147,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     get_zmq_socket,
     is_cpu,
+    is_npu,
     kill_itself_when_parent_died,
     point_to_point_pyobj,
     pyspy_dump_schedulers,
@@ -157,6 +158,10 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+
+_is_npu = is_npu()
+if _is_npu:
+    import torch_npu
 
 logger = logging.getLogger(__name__)
 
