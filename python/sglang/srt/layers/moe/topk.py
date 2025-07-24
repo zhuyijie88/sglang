@@ -313,7 +313,9 @@ def npu_topk(
     topk_weight, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
         gating_output,
         k=topk,
-        bias=torch.zeros(n_routed_experts, device=gating_output.device, dtype=gating_output.dtype),
+        bias=torch.zeros(
+            n_routed_experts, device=gating_output.device, dtype=gating_output.dtype
+        ),
         k_group=topk_group,
         group_count=num_expert_group,
         group_select_mode=1,
@@ -321,7 +323,8 @@ def npu_topk(
         norm_type=1,
         out_flag=False,
         routed_scaling_factor=routed_scaling_factor,
-        eps=float(1e-20))
+        eps=float(1e-20),
+    )
     return topk_weight, topk_ids
 
 
@@ -638,7 +641,9 @@ def select_experts(
     routed_scaling_factor: Optional[float] = None,
     num_token_non_padded: Optional[torch.Tensor] = None,
     expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
-):
+    n_routed_experts: Optional[int] = None,
+) -> TopKOutput:
+
     router_logits, correction_bias = (
         expert_location_dispatch.transform_select_experts_inputs(
             router_logits=router_logits,

@@ -301,14 +301,10 @@ class DeviceRunnerBase(ABC):
             (self.max_bs,), self.seq_len_fill_value, dtype=torch.int32
         )
 
-<<<<<<< HEAD
         if self.enable_torch_compile:
             set_torch_compile_config()
 
         if self.model_runner.server_args.enable_lora:
-=======
-        if self.model_runner.server_args.lora_paths is not None:
->>>>>>> 5fc802f1 (support NpuGraphRunner)
             self.model_runner.lora_manager.init_cuda_graph_batch_info(self.max_bs)
 
         # Graph inputs

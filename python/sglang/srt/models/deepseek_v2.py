@@ -62,7 +62,7 @@ from sglang.srt.layers.moe.ep_moe.layer import (
     get_moe_impl_class,
 )
 from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
-from sglang.srt.layers.moe.topk import TopK, select_experts, npu_topk
+from sglang.srt.layers.moe.topk import TopK, npu_topk, select_experts
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_kernel import (
@@ -640,7 +640,8 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         pad_size = None
-        if forward_batch.forward_mode.is_extend():
+        forward_mode = forward_batch.forward_mode
+        if forward_mode.is_extend():
             pad_size = (
                 forward_batch.seq_lens_sum // get_attention_tp_size() + 1
             ) - hidden_states.size(0)
@@ -649,13 +650,12 @@ class DeepseekV2MoE(nn.Module):
                 forward_batch.batch_size // get_attention_tp_size() + 1
             ) - hidden_states.size(0)
         hidden_states = F.pad(hidden_states, [0, 0, 0, pad_size], "constant", 0)
-        forward_mode = forward_batch.forward_mode
         shared_output = None
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
             shared_output = self._forward_shared_experts(hidden_states)
-            topk_weights, topk_idx = select_experts(
+            topk_weights, topk_idx, _ = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 top_k=self.top_k,
@@ -699,7 +699,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
-                forward_mode=forward_mode,
+                forward_batch=forward_batch,
             )
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -711,7 +711,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
-                forward_mode=forward_mode,
+                forward_batch=forward_batch,
                 topk_ids=topk_ids,
                 ep_send_counts=ep_recv_counts,
                 tp_send_counts=tp_recv_counts,
@@ -933,7 +933,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=None,
+            quant_config=(
+                None if _is_npu else quant_config
+            ),  # NPU not support quantization method for kv_b_proj
             prefix=add_prefix("kv_b_proj", prefix),
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
@@ -1431,20 +1433,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                 torch.bfloat16,
             )
             attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        elif _is_npu:
-            attn_bmm_output = torch.empty(
-                (self.num_local_heads, attn_output.shape[0], self.v_head_dim),
-                dtype=attn_output.dtype,
-                device=attn_output.device,
-            )
-            torch.bmm(
-                attn_output.transpose(0, 1),
-                self.w_vc,
-                out=attn_bmm_output,
-            )
-            attn_bmm_output = attn_bmm_output.transpose(0, 1).reshape(
-                -1, self.num_local_heads * self.v_head_dim
-            )
         else:
             attn_bmm_output = torch.empty(
                 (attn_output.shape[0], self.num_local_heads * self.v_head_dim),
@@ -2627,15 +2615,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                     if is_decoder:
                         name = name.replace(nextn_layer_prefix, "model.decoder")
 
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "weight_offset" in name:
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
+                if "rotary_emb.inv_freq" in name:
                     continue
+                if "weight_offset" in name:
+                    if _is_npu:  # NPU not support for weight_offset now.
+                        continue
+
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     # Skip non-stacked layers and experts (experts handled below).
                     if weight_name not in name:

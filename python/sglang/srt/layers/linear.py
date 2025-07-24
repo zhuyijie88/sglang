@@ -26,7 +26,6 @@ from sglang.srt.layers.parameter import (
     RowvLLMParameter,
     _ColumnvLLMParameter,
 )
-<<<<<<< HEAD
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.utils import is_cpu, is_npu, set_weight_attrs
 
@@ -35,25 +34,6 @@ if TYPE_CHECKING:
         QuantizationConfig,
         QuantizeMethodBase,
     )
-=======
-from sglang.srt.layers.quantization.base_config import (
-    QuantizationConfig,
-    QuantizeMethodBase,
-)
-from sglang.srt.utils import (
-    _process_weight_after_loading,
-    cpu_has_amx_support,
-    is_cpu,
-    is_npu,
-    set_weight_attrs,
-)
->>>>>>> 75aa9ac0 (npu matmul weight nz)
-
-_is_npu = is_npu()
-if _is_npu:
-    import torch_npu
-
-    torch.npu.config.allow_internal_format = True
 
 logger = logging.getLogger(__name__)
 
@@ -126,108 +106,6 @@ def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
     return param[shard_id], loaded_weight
 
 
-<<<<<<< HEAD
-=======
-class LinearMethodBase(QuantizeMethodBase):
-    """Base class for different (maybe quantized) linear methods."""
-
-    @abstractmethod
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: List[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        """Create weights for a linear layer.
-           The weights will be set as attributes of the layer.
-
-        Args:
-            layer: The layer that is using the LinearMethodBase factory.
-            input_size_per_partition: Size of the weight input dim on rank X.
-            output_partition_sizes: Sizes of the output dim of each logical
-                weight on rank X. E.g., output_partition_sizes for QKVLinear
-                is a list contains the width of Wq, Wk, Wv on rank X.
-            input_size: Size of the input dim of the weight across all ranks.
-            output_size: Size of the output dim of the weight across all ranks.
-            params_dtype: Datatype of the parameters.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Apply the weights in layer to the input tensor.
-        Expects create_weights to have been called before on the layer."""
-        raise NotImplementedError
-
-
-class UnquantizedLinearMethod(LinearMethodBase):
-    """Linear method without quantization."""
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: List[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        weight = Parameter(
-            torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, extra_weight_attrs)
-        self.enable_weight_nz = _is_npu
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.enable_weight_nz:
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data.transpose(-1, -2).contiguous(), 29
-            )  # 29: NZ format
-            layer.weight.input_dim = 0
-            layer.weight.output_dim = 1
-        elif _is_cpu and _is_cpu_amx_available:
-            _process_weight_after_loading(layer, ["weight"])
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
-        if getattr(layer, "use_intel_amx_backend", False):
-            out = torch.ops.sgl_kernel.weight_packed_linear(
-                x, layer.weight, bias, True  # is_vnni
-            )
-        elif _is_npu and self.enable_weight_nz:
-            origin_shape = x.size()
-            out = torch.matmul(x.view(-1, origin_shape[-1]), layer.weight.data)
-            if bias is not None:
-                out = out + bias
-            out = out.view((*origin_shape[:-1], -1))
-        else:
-            out = F.linear(x, layer.weight, bias)
-        return out
-
-
->>>>>>> 75aa9ac0 (npu matmul weight nz)
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 
