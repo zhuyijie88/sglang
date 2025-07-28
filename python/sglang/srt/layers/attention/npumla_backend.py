@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch_npu
 
 from sglang.global_config import global_config
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInfo
 
 
-PAGE_SIZE = 128
 MAX_SEQ_LEN = 4096
 
 
@@ -100,7 +100,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         self.device = model_runner.device
         self.skip_prefill = skip_prefill
         self.forward_metadata: Optional[NpuMLADecodeMetadata] = None
-
+        self.page_size = model_runner.page_size
         self.num_q_heads = (
             model_runner.model_config.num_attention_heads // get_attention_tp_size()
         )
@@ -222,7 +222,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         pass
 
     def get_cuda_graph_seq_len_fill_value(self):
-        return 1
+        return 0
 
     def forward_decode(
         self,
@@ -265,17 +265,23 @@ class NpuMLABackend(TorchNativeAttnBackend):
             if q_rope.numel() == 0:
                 q_rope = None
 
-        k_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).to(
-            q.dtype
-        )
+        k_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
         if q_rope is None:
-            v_cache = forward_batch.token_to_kv_pool.get_value_buffer(
-                layer.layer_id
-            ).to(q.dtype)
+            v_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
+        elif (
+            hasattr(forward_batch.token_to_kv_pool, "enable_kv_cache_seperated")
+            and forward_batch.token_to_kv_pool.enable_kv_cache_seperated
+        ):
+            v_cache = k_rope
         else:
             v_cache = k_cache
+
         o = self._run_npu_forward_decode(
-            (q_nope, q_rope), k_cache, v_cache, layer, forward_batch
+            (q_nope, q_rope),
+            k_cache if save_kv_cache else k,
+            v_cache,
+            layer,
+            forward_batch,
         )
         return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -291,28 +297,30 @@ class NpuMLABackend(TorchNativeAttnBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
-        if (
-            forward_batch.forward_mode == ForwardMode.EXTEND
-            or forward_batch.forward_mode == ForwardMode.DRAFT_EXTEND
-        ):
+        if forward_batch.forward_mode.is_extend_or_draft_extend_or_mixed():
             if k_rope is not None:
-                forward_batch.token_to_kv_pool.set_mla_kv_buffer(
-                    layer,
-                    forward_batch.out_cache_loc,
-                    k,
-                    k_rope,
-                )
+                if save_kv_cache:
+                    forward_batch.token_to_kv_pool.set_mla_kv_buffer(
+                        layer,
+                        forward_batch.out_cache_loc,
+                        k,
+                        k_rope,
+                    )
+                    k_cache = forward_batch.token_to_kv_pool.get_key_buffer(
+                        layer.layer_id
+                    )
+                    v_cache = k_cache
+                else:
+                    k_cache = k
+                    v_cache = k_rope
                 bs = forward_batch.batch_size
                 q_nope = q.view(bs, -1, layer.tp_q_head_num, layer.v_head_dim)
                 q_rope = q_rope.view(
                     bs, -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
                 )
-                k_cache = forward_batch.token_to_kv_pool.get_key_buffer(
-                    layer.layer_id
-                ).to(q.dtype)
 
                 o = self._run_npu_forward_decode(
-                    (q_nope, q_rope), k_cache, k_cache, layer, forward_batch
+                    (q_nope, q_rope), k_cache, v_cache, layer, forward_batch
                 )
                 return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -324,8 +332,12 @@ class NpuMLABackend(TorchNativeAttnBackend):
                         k,
                         v,
                     )
-            use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
-            return self._run_npu_forward_extend(q, k, v, layer, forward_batch, use_gqa)
+                use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
+                return self._run_npu_forward_extend(
+                    q, k, v, layer, forward_batch, use_gqa
+                )
+        else:
+            raise NotImplementedError(f"unsupported {forward_batch.forward_mode=}")
 
     def _run_npu_forward_extend(self, q, k, v, layer, forward_batch, use_gqa=False):
         """
@@ -333,11 +345,19 @@ class NpuMLABackend(TorchNativeAttnBackend):
         k: (b*s, N, k_dim=192)
         v: (b*s, N, v_dim=128)
         """
-        if q.ndim == 2:
-            q = q.view(q.shape[0], self.num_local_heads, -1)
-        bs_qlen, q_heads, q_dim = q.size()
-        _, k_heads, k_dim = k.size()
-        _, v_heads, v_dim = v.size()
+        if not isinstance(q, Tuple):
+            if q.ndim == 2:
+                q = q.view(q.shape[0], self.num_local_heads, -1)
+            bs_qlen, q_heads, q_dim = q.size()
+        else:
+            q_heads = self.num_local_heads
+            q_dim = self.qk_rope_head_dim
+        if not isinstance(k, Tuple):
+            _, k_heads, k_dim = k.size()
+        else:
+            k_heads = self.num_local_heads
+            k_dim = self.qk_rope_head_dim
+        bs_qlen, v_heads, v_dim = v.size()
 
         if use_gqa:
             attn_output = torch.empty(
@@ -362,12 +382,18 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 q_len_offset += q_len
         else:  # MHA
             if q_dim != v_dim:
-                q_nope, q_rope = q.split(
-                    [self.v_head_dim, self.qk_rope_head_dim], dim=-1
-                )
-                k_nope, k_rope = k.split(
-                    [self.v_head_dim, self.qk_rope_head_dim], dim=-1
-                )
+                if isinstance(k, Tuple):
+                    q_nope, q_rope = q
+                else:
+                    q_nope, q_rope = q.split(
+                        [self.v_head_dim, self.qk_rope_head_dim], dim=-1
+                    )
+                if isinstance(k, Tuple):
+                    k_nope, k_rope = k
+                else:
+                    k_nope, k_rope = k.split(
+                        [self.v_head_dim, self.qk_rope_head_dim], dim=-1
+                    )
 
                 attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                     q_nope,
@@ -411,13 +437,21 @@ class NpuMLABackend(TorchNativeAttnBackend):
             q_nope, q_rope = q
         else:
             q_nope, q_rope = q.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        b, s, n, _ = q_nope.size()
-        _, k_heads, k_dim = k_cache.size()
+        b, s, n, q_nope_dim = q_nope.size()
 
         if q_rope is not None:  # MLA
-            k_cache = k_cache.view(-1, PAGE_SIZE, k_dim)
-            k_nope = k_cache[..., : self.kv_lora_rank]
-            k_rope = k_cache[..., self.kv_lora_rank :]
+            k_cache = k_cache.view(-1, self.page_size, k_dim)
+            if not forward_batch.token_to_kv_pool.enable_kv_cache_seperated:
+                k_nope = k_cache[..., :q_nope_dim]
+                k_rope = k_cache[..., q_nope_dim:]
+            else:
+                k_nope = k_cache
+                k_rope = v_cache
+
+            q_nope = q_nope.reshape(b, s, n, self.kv_lora_rank)
+            q_rope = q_rope.reshape(b, s, n, self.qk_rope_head_dim)
+            sparse_mode = 0
+            atten_mask = None
 
             attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                 q_nope,
@@ -428,25 +462,27 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 num_heads=n,
                 num_key_value_heads=1,
                 input_layout="BSND",
-                atten_mask=None,
-                sparse_mode=0,
+                atten_mask=atten_mask,
+                sparse_mode=sparse_mode,
                 scale=layer.scaling,
                 antiquant_mode=0,
                 antiquant_scale=None,
-                block_table=self.forward_metadata.block_kv_indices,
-                block_size=PAGE_SIZE,
+                block_table=self.forward_metadata.block_kv_indices[:b],
+                block_size=self.page_size,
                 actual_seq_lengths_kv=self.forward_metadata.seq_lens_list,
             )
         else:  # MHA
+            _, k_heads, k_dim = k_cache.size()
+
             attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                 q_nope,
-                k_cache.view(-1, PAGE_SIZE, k_heads * k_dim),
-                v_cache.view(-1, PAGE_SIZE, k_heads * k_dim),
+                k_cache.view(-1, self.page_size, k_heads * k_dim),
+                v_cache.view(-1, self.page_size, k_heads * k_dim),
                 num_heads=n,
                 num_key_value_heads=k_heads,
                 input_layout="BSND",
                 atten_mask=None,
-                block_size=PAGE_SIZE,
+                block_size=self.page_size,
                 block_table=self.forward_metadata.block_kv_indices,
                 actual_seq_lengths_kv=self.forward_metadata.seq_lens_list,
                 scale=layer.scaling,

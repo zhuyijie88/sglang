@@ -17,6 +17,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
+import torch
 from torch import nn
 
 if TYPE_CHECKING:
@@ -90,14 +91,15 @@ class RadixAttention(nn.Module):
         save_kv_cache: bool = True,
         **kwargs,
     ):
-        if k is not None:
+        if k is not None and isinstance(k, torch.Tensor):
             # For cross-layer sharing, kv can be None
             assert v is not None
-            if "k_rope" not in kwargs:
-                k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
-                v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
-            else:
-                k = k.view(-1, self.tp_k_head_num, self.v_head_dim)
+            if k.ndim != 5:
+                if "k_rope" not in kwargs:
+                    k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
+                    v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
+                else:
+                    k = k.view(-1, self.tp_k_head_num, self.v_head_dim)
 
         return forward_batch.attn_backend.forward(
             q,
