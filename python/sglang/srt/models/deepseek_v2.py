@@ -1442,7 +1442,6 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch.attn_backend.qk_rope_head_dim,
         )
 
-        block_num, block_size, _ = key_cache.shape
         _, _, k_pe, kv_a = torch_npu.npu_kv_rmsnorm_rope_cache(
             latent_cache.view(bsz, 1, -1, self.kv_lora_rank + self.qk_rope_head_dim),
             self.kv_a_layernorm.weight,
@@ -1628,8 +1627,14 @@ class DeepseekV2AttentionMLA(nn.Module):
             1,
             forward_batch.attn_backend.qk_rope_head_dim,
         )
+        block_num, block_size, _, _ = nope_cache.size()
+        if (
+            forward_batch.forward_mode.is_target_verify()
+            or forward_batch.forward_mode.is_draft_extend()
+        ):
+            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
-        block_num, block_size, _ = nope_cache.size()
         k_rope, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             latent_cache,
             self.kv_a_layernorm.weight,
@@ -3101,8 +3106,12 @@ class DeepseekV2ForCausalLM(nn.Module):
         del self.lm_head.weight
         self.model.embed_tokens.weight = embed
         self.lm_head.weight = head
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if _is_npu:
+            torch.npu.empty_cache()
+            torch.npu.synchronize()
+        elif _is_cuda:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):

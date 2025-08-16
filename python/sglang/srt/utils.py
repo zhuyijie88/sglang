@@ -1686,7 +1686,6 @@ def get_compiler_backend() -> str:
             )
         global npu_backend
         if npu_backend is not None:
-            logger.info("npu_backend is already registered, return it.")
             return npu_backend
         compiler_config = CompilerConfig()
         for config_group, config_value in npu_compile_config.items():

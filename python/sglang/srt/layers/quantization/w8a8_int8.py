@@ -203,10 +203,7 @@ class W8A8Int8Config(QuantizationConfig):
         if _is_npu:
             if self.is_dynamic:
                 return
-            else:
-                logger.info(
-                    f"Ascend w8a8_int8 quantization with bias, use wrappers to isolate the effects between models, the corresponding forword_npu function is called in w8a8_int8.py"
-                )
+
             # Ascend w8a8_int8 quantization with bias, use wrappers to isolate the effects between models
             for name in self.quant_description.keys():
                 if "norm.bias" in name:
@@ -263,6 +260,8 @@ class W8A8Int8Config(QuantizationConfig):
 
         if _is_npu:
             if isinstance(layer, LinearBase):
+                if "decoder" in prefix:
+                    prefix = prefix.replace("decoder", "layers.61")
                 prefix_in_quant_config = prefix
                 proj_name = prefix.split(".")[-1]
                 if proj_name in self.packed_modules_mapping:

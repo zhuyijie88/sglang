@@ -58,8 +58,6 @@ elif _is_hip:
     )
 
     warnings.warn(f"HIP does not support fused_marlin_moe currently.")
-else:
-    warnings.warn(f"Only CUDA and HIP support AWQ currently.")
 
 logger = logging.getLogger(__name__)
 

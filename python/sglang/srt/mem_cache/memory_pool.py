@@ -778,15 +778,13 @@ class MLATokenToKVPool(KVCache):
                 else nullcontext()
             ):
                 # The padded slot 0 is used for writing dummy outputs from padded tokens.
-                if _is_npu:
-                    # NPU only support 128 align
-                    size_align = (size + page_size) // 128 * 128
-                else:
-                    size_align = size + page_size
+                size = size + page_size
+                if page_size > 1:
+                    assert size % page_size == 0
                 if not self.enable_kv_cache_seperated:
                     self.kv_buffer = [
                         torch.zeros(
-                            (size_align, 1, kv_lora_rank + qk_rope_head_dim),
+                            (size, 1, kv_lora_rank + qk_rope_head_dim),
                             dtype=self.store_dtype,
                             device=device,
                         )
@@ -795,7 +793,7 @@ class MLATokenToKVPool(KVCache):
                 else:
                     self.k_buffer = [
                         torch.zeros(
-                            (size_align, 1, kv_lora_rank),
+                            (size, 1, kv_lora_rank),
                             dtype=self.store_dtype,
                             device=self.device,
                         )
@@ -803,7 +801,7 @@ class MLATokenToKVPool(KVCache):
                     ]
                     self.v_buffer = [
                         torch.zeros(
-                            (size_align, 1, qk_rope_head_dim),
+                            (size, 1, qk_rope_head_dim),
                             dtype=self.store_dtype,
                             device=self.device,
                         )
