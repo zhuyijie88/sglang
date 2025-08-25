@@ -40,6 +40,7 @@ jobs:
 
       - name: Copy dataset  # Copy the test dataset to the shared directory
         run: |
+          sleep 3000
           # copy required file from our daily cache
           cp ~/.cache/modelscope/hub/datasets/otavia/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json /tmp
           # copy download through proxy
