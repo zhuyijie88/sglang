@@ -8,8 +8,6 @@ name: nightly dev image build and push
 on:
   workflow_dispatch:
   workflow_call:
-  schedule:
-    - cron: "0 18 * * *" # run at 2:00AM in TZ=Asia/Shanghai
   pull_request:
     branches: ["main"]
     paths:
