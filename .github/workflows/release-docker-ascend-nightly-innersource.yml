@@ -7,6 +7,7 @@ name: nightly dev image build and push
 
 on:
   workflow_dispatch:
+  workflow_call:
   schedule:
     - cron: "0 18 * * *" # run at 2:00AM in TZ=Asia/Shanghai
   pull_request:
@@ -22,7 +23,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: self-hosted-x86
+    runs-on: self-hosted-arm64
     strategy:
       matrix:
         cann_version: ["8.2.rc1"]
