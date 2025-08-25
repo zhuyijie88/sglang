@@ -17,6 +17,9 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ADMIN_PAT }}
+
       - name: download models
         run: |
           pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple
