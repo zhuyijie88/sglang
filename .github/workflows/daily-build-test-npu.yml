@@ -17,16 +17,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    uses: ./.github/workflows/release-docker-ascend-nightly-innersource.yml
+  # build:
+    # uses: ./.github/workflows/release-docker-ascend-nightly-innersource.yml
 
   build-test-1-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-2
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
     steps:
+      - name: Pre-config git access token
+        run: |
+          # as we use a proxy but checkout@v4 only set basic auth header for github.com
+          # so we set the extraheader manually
+          TOKEN=`echo -n "x-access-token:${{ secrets.ADMIN_PAT }}"|base64`
+          git config --global http.https://gh-proxy.test.osinfra.cn/.extraheader "AUTHORIZATION: basic $TOKEN"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -49,12 +56,19 @@ jobs:
           python3 run_suite.py --suite per-commit-1-ascend-npu --timeout-per-file 3600
 
   build-test-2-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-4
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
     steps:
+      - name: Pre-config git access token
+        run: |
+          # as we use a proxy but checkout@v4 only set basic auth header for github.com
+          # so we set the extraheader manually
+          TOKEN=`echo -n "x-access-token:${{ secrets.ADMIN_PAT }}"|base64`
+          git config --global http.https://gh-proxy.test.osinfra.cn/.extraheader "AUTHORIZATION: basic $TOKEN"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -77,12 +91,19 @@ jobs:
           python3 run_suite.py --suite per-commit-2-ascend-npu --timeout-per-file 3600
 
   build-test-4-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-8
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
     steps:
+      - name: Pre-config git access token
+        run: |
+          # as we use a proxy but checkout@v4 only set basic auth header for github.com
+          # so we set the extraheader manually
+          TOKEN=`echo -n "x-access-token:${{ secrets.ADMIN_PAT }}"|base64`
+          git config --global http.https://gh-proxy.test.osinfra.cn/.extraheader "AUTHORIZATION: basic $TOKEN"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
