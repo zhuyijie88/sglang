@@ -9,7 +9,12 @@ on:
     paths:
       - ".github/workflows/pre-downloaded-datasets.ini"
       - ".github/workflows/pre-downloaded-models.ini"
-      - ".github/workflows/sync-models-datasets.ini"
+      - ".github/workflows/sync-models-datasets.yml"
+
+concurrency:
+  group: sync-models-datasets-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   sync_dataset:
     runs-on: linux-aarch64-a3-2
