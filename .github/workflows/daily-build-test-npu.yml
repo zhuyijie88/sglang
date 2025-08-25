@@ -22,7 +22,8 @@ jobs:
 
   build-test-1-ascend-npu:
     # needs: [ build ]
-    if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-2
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
@@ -57,7 +58,8 @@ jobs:
 
   build-test-2-ascend-npu:
     # needs: [ build ]
-    if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-4
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
@@ -92,7 +94,8 @@ jobs:
 
   build-test-4-ascend-npu:
     # needs: [ build ]
-    if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
+    if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-8
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
