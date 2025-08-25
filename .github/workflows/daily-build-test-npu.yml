@@ -1,0 +1,117 @@
+name: Daily Build Test (Ascend NPU)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - "python/sglang/version.py"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-build-test-npu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-1-ascend-npu:
+    if: github.repository == 'ascend/sglang' || github.event_name == 'pull_request'
+    runs-on: linux-aarch64-a3-2
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy dataset  # Copy the test dataset to the shared directory
+        run: |
+          # copy required file from our daily cache
+          cp ~/.cache/modelscope/hub/datasets/otavia/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json /tmp
+          # copy download through proxy
+          curl -o /tmp/test.jsonl -L https://gh-proxy.test.osinfra.cn/https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
+
+      - name: Run test
+        timeout-minutes: 30
+        env:
+          SGLANG_USE_MODELSCOPE: true
+          SGLANG_IS_IN_CI: true
+          HF_ENDPOINT: https://hf-mirror.com
+          TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
+        run: |
+          cd test/srt
+          python3 run_suite.py --suite per-commit-1-ascend-npu --timeout-per-file 3600
+
+  build-test-2-ascend-npu:
+    if: github.repository == 'ascend/sglang' || github.event_name == 'pull_request'
+    runs-on: linux-aarch64-a3-4
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy dataset
+        run: |
+          # copy required file from our daily cache
+          cp ~/.cache/modelscope/hub/datasets/otavia/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json /tmp
+          # copy download through proxy
+          curl -o /tmp/test.jsonl -L https://gh-proxy.test.osinfra.cn/https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
+
+      - name: Run test
+        timeout-minutes: 30
+        env:
+          SGLANG_USE_MODELSCOPE: true
+          SGLANG_IS_IN_CI: true
+          HF_ENDPOINT: https://hf-mirror.com
+          TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
+        run: |
+          cd test/srt
+          python3 run_suite.py --suite per-commit-2-ascend-npu --timeout-per-file 3600
+
+  build-test-4-ascend-npu:
+    if: github.repository == 'ascend/sglang' || github.event_name == 'pull_request'
+    runs-on: linux-aarch64-a3-8
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy dataset
+        run: |
+          # copy required file from our daily cache
+          cp ~/.cache/modelscope/hub/datasets/otavia/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json /tmp
+          # copy download through proxy
+          curl -o /tmp/test.jsonl -L https://gh-proxy.test.osinfra.cn/https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
+
+      - name: Run test
+        timeout-minutes: 30
+        env:
+          SGLANG_USE_MODELSCOPE: true
+          SGLANG_IS_IN_CI: true
+          HF_ENDPOINT: https://hf-mirror.com
+          TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
+        run: |
+          cd test/srt
+          python3 run_suite.py --suite per-commit-4-ascend-npu --timeout-per-file 3600
+
+  bulid-test-npu-finish:
+    if: always()
+    needs:
+      - build-test-1-ascend-npu
+      - build-test-2-ascend-npu
+      - build-test-4-ascend-npu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        run: |
+          results=(${{ join(needs.*.result, ' ') }})
+          for result in "${results[@]}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "Job failed with result: $result"
+              exit 1
+            fi
+          done
+          echo "All jobs completed successfully"
+          exit 0
