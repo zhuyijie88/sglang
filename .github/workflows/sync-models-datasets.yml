@@ -33,7 +33,7 @@ jobs:
       - name: download models
         run: |
           pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple
-          pip install filelock modelscope
+          pip install filelock modelscope datasets
           for m in `cat .github/workflows/pre-downloaded-models.ini`;do modelscope download  --model $m;done
       - name: download dataset
         run: |
