@@ -129,8 +129,8 @@ jobs:
           STREAMS_PER_DEVICE: 32
           ASCEND_LAUNCH_BLOCKING: 1
         run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg
-          pip list
+          pip uninstall sglang
+          pip install -v -e python[srt_npu] --no-cache-dir
           cd test/srt
           python3 run_suite.py --suite per-commit-4-ascend-npu --timeout-per-file 3600
 
