@@ -19,7 +19,7 @@ jobs:
     # uses: ./.github/workflows/release-docker-ascend-nightly-innersource.yml
 
   build-test-1-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-2
@@ -51,11 +51,12 @@ jobs:
           HF_ENDPOINT: https://hf-mirror.com
           TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
         run: |
+          export STREAMS_PER_DEVICE=32
           cd test/srt
           python3 run_suite.py --suite per-commit-1-ascend-npu --timeout-per-file 3600
 
   build-test-2-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-4
@@ -87,11 +88,12 @@ jobs:
           HF_ENDPOINT: https://hf-mirror.com
           TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
         run: |
+          export STREAMS_PER_DEVICE=32
           cd test/srt
           python3 run_suite.py --suite per-commit-2-ascend-npu --timeout-per-file 3600
 
   build-test-4-ascend-npu:
-    needs: [ build ]
+    # needs: [ build ]
     # if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     if: (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request')
     runs-on: linux-aarch64-a3-8
@@ -123,6 +125,7 @@ jobs:
           HF_ENDPOINT: https://hf-mirror.com
           TORCH_EXTENSIONS_DIR: /tmp/torch_extensions
         run: |
+          export STREAMS_PER_DEVICE=32
           cd test/srt
           python3 run_suite.py --suite per-commit-4-ascend-npu --timeout-per-file 3600
 
