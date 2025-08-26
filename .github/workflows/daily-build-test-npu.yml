@@ -129,8 +129,8 @@ jobs:
           STREAMS_PER_DEVICE: 32
           ASCEND_LAUNCH_BLOCKING: 1
         run: |
-          pip uninstall sglang
-          pip install -v -e python[srt_npu] --no-cache-dir
+          pip uninstall -y sglang
+          pip install -y -v -e python[srt_npu] --no-cache-dir
           cd test/srt
           python3 run_suite.py --suite per-commit-4-ascend-npu --timeout-per-file 3600
 
