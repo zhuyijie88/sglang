@@ -33,7 +33,7 @@ class TestAscendMlaW8A8Int8(CustomTestCase):
             "--trust-remote-code",
             "--disable-cuda-graph",
             "--mem-fraction-static",
-            0.9,
+            0.8,
             "--attention-backend",
             "ascend",
             "--quantization",
