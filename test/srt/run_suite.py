@@ -270,6 +270,7 @@ suite_ascend = {
     "per-commit-1-ascend-npu": [
         TestFile("ascend/test_ascend_tp1_bf16.py", 400),
         TestFile("ascend/test_ascend_graph_tp1_bf16.py", 400),
+        TestFile("models/test_qwen_models.py", 400),
     ],
     "per-commit-2-ascend-npu": [
         TestFile("ascend/test_ascend_tp2_bf16.py", 400),
