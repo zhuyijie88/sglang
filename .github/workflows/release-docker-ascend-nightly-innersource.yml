@@ -7,14 +7,7 @@ name: nightly dev image build and push
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 18 * * *" # run at 2:00AM in TZ=Asia/Shanghai
-  pull_request:
-    branches: ["main"]
-    paths:
-      - ".github/workflows/release-docker-ascend-nightly.yml"
-      - "python/**"
-      - "docker/Dockerfile.npu"
+  workflow_call:
 
 concurrency:
   group: release-docker-ascend-nightly-${{ github.ref }}
@@ -22,16 +15,21 @@ concurrency:
 
 jobs:
   build:
-    runs-on: self-hosted-x86
+    runs-on: self-hosted-arm64
     strategy:
       matrix:
         cann_version: ["8.2.rc1"]
         device_type: ["a3"]
     steps:
       - name: Checkout repository
+        if: github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/checkout@v5
         with:
           token: ${{ secrets.ADMIN_PAT }}
+
+      - name: Checkout no repository
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
