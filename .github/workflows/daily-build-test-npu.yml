@@ -8,6 +8,8 @@ on:
       - main
     paths:
       - "python/sglang/version.py"
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
