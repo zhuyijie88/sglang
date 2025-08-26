@@ -43,7 +43,7 @@ class TestQwen2(CustomTestCase):
         os.environ["USE_VLLM_CUSTOM_ALLREDUCE"] = "1"
         os.environ["HCCL_EXEC_TIMEOUT"] = "200"
         os.environ["STREAMS_PER_DEVICE"] = "32"
-        env = os.environ.copy() if is_npu() else None
+        env = os.environ.copy() if is_npu() else None  # These env variables need to be configured in the NPU.
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
