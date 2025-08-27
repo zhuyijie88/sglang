@@ -908,6 +908,7 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
+        forward_batch.global_num_tokens_cpu = [forward_batch.extend_num_tokens]
         if forward_batch.seq_lens_cpu is not None:
             forward_batch.seq_lens_sum = forward_batch.seq_lens_cpu.sum().item()
         else:
@@ -929,12 +930,8 @@ class EAGLEWorker(TpModelWorker):
             forward_batch.spec_info.hidden_states = logits_output.hidden_states
         else:
             forward_batch.can_run_dp_cuda_graph = False
-            if not forward_batch.forward_mode.is_idle():
-                self.draft_model_runner.attn_backend.init_forward_metadata(
-                    forward_batch
-                )
             logits_output, _ = self.draft_model_runner.forward(
-                forward_batch, skip_attn_backend_init=True
+                forward_batch, skip_attn_backend_init=False
             )
             self.capture_for_decode(logits_output, forward_batch.spec_info)
 

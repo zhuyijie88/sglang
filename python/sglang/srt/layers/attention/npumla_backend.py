@@ -7,8 +7,9 @@ Support attention backend for NpuMLA.
 Enable speculative sampling in NpuMLA
 """
 
+import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 import numpy as np
 import torch
@@ -16,10 +17,6 @@ import torch.nn.functional as F
 import torch_npu
 
 from sglang.global_config import global_config
-from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.attention.flashinfer_mla_backend import (
-    FlashInferMLAIndicesUpdaterDecode,
-)
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -35,53 +32,65 @@ MAX_SEQ_LEN = 4096
 
 
 @dataclass
-class NpuMLADecodeMetadata:
-    npumla_metadata: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+class NpuMLAMetadata:
     block_kv_indices: Optional[torch.Tensor] = None
+    mc2_mask: Optional[torch.Tensor] = None
+    q_lens_list: Optional[list[int]] = None
+    kv_lens_list: Optional[list[int]] = None
 
     def __init__(
         self,
-        npumla_metadata: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         block_kv_indices: Optional[torch.Tensor] = None,
         seq_lens_list=None,
         forward_batch: ForwardBatch = None,
     ):
-        self.npumla_metadata = npumla_metadata
         self.block_kv_indices = block_kv_indices
-        self.seq_lens_list = seq_lens_list if seq_lens_list is not None else [1]
-        self.seq_lens_list_cumsum = np.cumsum(self.seq_lens_list).tolist()
-        self.mc2_mask = None
+        self.q_lens_list = seq_lens_list or [1]
+
         if (
             forward_batch.is_extend_in_batch
             or forward_batch.global_num_tokens_cpu is None
         ):
             tp_size = get_attention_tp_size()
-            self.seq_lens_list_cumsum[-1] = (
-                (self.seq_lens_list_cumsum[-1] - 1) // tp_size + 1
+            self.kv_lens_list = np.cumsum(self.q_lens_list).tolist()
+            self.kv_lens_list[-1] = (
+                (self.kv_lens_list[-1] - 1) // tp_size + 1
             ) * tp_size
         elif forward_batch.forward_mode.is_target_verify():
-            bs = (
-                forward_batch.global_num_tokens_cpu[0]
-                // forward_batch.spec_info.draft_token_num
+            draft_token_num = forward_batch.spec_info.draft_token_num
+            kv_lens = np.array(seq_lens_list) + draft_token_num
+            self.kv_lens_list = kv_lens.tolist()
+            valid_bs = len(self.q_lens_list)
+            self.q_lens_list = list(
+                range(
+                    draft_token_num, draft_token_num * (valid_bs + 1), draft_token_num
+                )
             )
-            self.seq_lens_list = [
-                i + forward_batch.spec_info.draft_token_num for i in self.seq_lens_list
-            ]
-            valid_bs = len(self.seq_lens_list)
-            assert valid_bs <= bs
-            if forward_batch.dp_padding_mode is not None and valid_bs < bs:
-                self.seq_lens_list += [0] * (bs - valid_bs)
+            if forward_batch.dp_padding_mode is not None:
+                fake_tokens = (
+                    forward_batch.global_num_tokens_cpu[0] - self.q_lens_list[-1]
+                )
+                if fake_tokens > 0:
+                    self.q_lens_list[-1] = forward_batch.global_num_tokens_cpu[0]
+                    # self.q_lens_list.append(forward_batch.global_num_tokens_cpu[0])
+                    # self.kv_lens_list.append(0)
+            self.block_kv_indices = self.block_kv_indices[: len(self.q_lens_list)]
         elif forward_batch.forward_mode.is_draft_extend():
             tp_size = get_attention_tp_size()
-            valid_bs = len(self.seq_lens_list)
-            bs = (valid_bs + tp_size - 1) // tp_size * tp_size
-            assert forward_batch.dp_padding_mode is None
-            if bs > valid_bs:
-                self.seq_lens_list += [0] * (bs - valid_bs)
-                self.block_kv_indices = F.pad(
-                    self.block_kv_indices, (0, 0, 0, bs - valid_bs), "constant", 0
-                )
+            self.kv_lens_list = copy.copy(self.q_lens_list)
+            self.q_lens_list = np.cumsum(forward_batch.extend_seq_lens_cpu).tolist()
+            align_global_num_tokens = (
+                (forward_batch.extend_num_tokens + tp_size - 1) // tp_size * tp_size
+            )
+            fake_tokens = align_global_num_tokens - self.q_lens_list[-1]
+            if fake_tokens > 0:
+                # todo (zyj) TND QS of each batch computed by actual_seq_lengths should be in range [0, 16]
+                self.q_lens_list.append(align_global_num_tokens)
+                self.kv_lens_list.append(0)
+            self.block_kv_indices = self.block_kv_indices[: len(self.q_lens_list)]
         elif forward_batch.global_num_tokens_for_logprob_cpu is not None:
+            self.kv_lens_list = copy.copy(self.q_lens_list)
+            self.q_lens_list = list(range(1, len(self.q_lens_list) + 1))
             vaild_batch = forward_batch.global_num_tokens_for_logprob_cpu[0]
             assert vaild_batch <= forward_batch.batch_size
             self.mc2_mask = torch.zeros(
@@ -101,7 +110,7 @@ def create_npumla_kv_indices(
     kv_indices_ptr,
     req_to_token_ptr_stride,
     kv_indices_ptr_stride,
-    PAGED_SIZE=128,
+    paged_size,
 ):
     req_to_token_ptr = req_to_token_ptr.view(-1)
 
@@ -111,12 +120,12 @@ def create_npumla_kv_indices(
 
         kv_start = 0
         kv_end = page_kernel_lens_ptr[pid]
-        num_pages = (kv_end - kv_start + PAGED_SIZE - 1) // PAGED_SIZE
+        num_pages = (kv_end - kv_start + paged_size - 1) // paged_size
 
         for i in range(num_pages):
             req_to_token_ptr_start = req_pool_index * req_to_token_ptr_stride + kv_start
-            paged_offset = req_to_token_ptr_start + i * PAGED_SIZE
-            kv_indices_ptr[pid, i] = req_to_token_ptr[paged_offset] // PAGED_SIZE
+            paged_offset = req_to_token_ptr_start + i * paged_size
+            kv_indices_ptr[pid, i] = req_to_token_ptr[paged_offset] // paged_size
 
 
 class NpuMLABackend(TorchNativeAttnBackend):
@@ -131,7 +140,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         self.max_context_len = model_runner.model_config.context_len
         self.device = model_runner.device
         self.skip_prefill = skip_prefill
-        self.forward_metadata: Optional[NpuMLADecodeMetadata] = None
+        self.forward_metadata: Optional[NpuMLAMetadata] = None
         self.page_size = model_runner.page_size
         self.num_q_heads = (
             model_runner.model_config.num_attention_heads // get_attention_tp_size()
@@ -178,12 +187,12 @@ class NpuMLABackend(TorchNativeAttnBackend):
         self.max_seqlen_pad = max_total_tokens // model_runner.server_args.page_size
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        bs = forward_batch.input_ids.size(0)
         if (
             forward_batch.forward_mode.is_decode_or_idle()
             or forward_batch.forward_mode.is_target_verify()
             or forward_batch.forward_mode.is_draft_extend()
         ):
+            bs = forward_batch.input_ids.size(0)
             block_kv_indices = torch.full(
                 (bs, self.max_seqlen_pad),
                 -1,
@@ -194,21 +203,24 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 forward_batch.batch_size,
                 self.req_to_token,
                 forward_batch.req_pool_indices,
-                forward_batch.seq_lens,
+                (
+                    forward_batch.seq_lens + self.num_draft_tokens
+                    if forward_batch.forward_mode.is_target_verify()
+                    else forward_batch.seq_lens
+                ),
                 None,
                 block_kv_indices,
                 self.req_to_token.stride(0),
                 self.max_seqlen_pad,
+                self.page_size,
             )
-            self.forward_metadata = NpuMLADecodeMetadata(
-                None,
+            self.forward_metadata = NpuMLAMetadata(
                 block_kv_indices,
                 forward_batch.seq_lens_cpu.tolist(),
                 forward_batch,
             )
         else:
-            self.forward_metadata = NpuMLADecodeMetadata(
-                None,
+            self.forward_metadata = NpuMLAMetadata(
                 None,
                 forward_batch.extend_seq_lens_cpu,
                 forward_batch,
@@ -232,8 +244,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         spec_info: Optional[SpecInfo],
         forward_batch: ForwardBatch,
     ):
-        self.forward_metadata = NpuMLADecodeMetadata(
-            None,
+        self.forward_metadata = NpuMLAMetadata(
             torch.full(
                 (bs, self.max_seqlen_pad),
                 0,
@@ -352,14 +363,9 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 else:
                     k_cache = k
                     v_cache = k_rope
-                bs = forward_batch.batch_size
-                q_nope = q.view(bs, -1, layer.tp_q_head_num, layer.v_head_dim)
-                q_rope = q_rope.view(
-                    bs, -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
-                )
 
                 o = self._run_npu_forward_decode(
-                    (q_nope, q_rope), k_cache, v_cache, layer, forward_batch
+                    (q, q_rope), k_cache, v_cache, layer, forward_batch
                 )
                 return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -444,8 +450,8 @@ class NpuMLABackend(TorchNativeAttnBackend):
                     input_layout="TND",
                     atten_mask=self.attn_mask,
                     sparse_mode=3,
-                    actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
-                    actual_seq_lengths_kv=self.forward_metadata.seq_lens_list_cumsum,
+                    actual_seq_lengths=self.forward_metadata.kv_lens_list,  # cumsum
+                    actual_seq_lengths_kv=self.forward_metadata.kv_lens_list,  # cumsum
                     scale=layer.scaling,
                     next_tokens=0,
                 )
@@ -458,8 +464,8 @@ class NpuMLABackend(TorchNativeAttnBackend):
                     input_layout="TND",
                     atten_mask=self.attn_mask,
                     sparse_mode=3,
-                    actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
-                    actual_seq_lengths_kv=self.forward_metadata.seq_lens_list_cumsum,
+                    actual_seq_lengths=self.forward_metadata.kv_lens_list,  # cumsum
+                    actual_seq_lengths_kv=self.forward_metadata.kv_lens_list,  # cumsum
                     scale=layer.scaling,
                     next_tokens=0,
                 )
@@ -476,7 +482,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
             q_nope, q_rope = q
         else:
             q_nope, q_rope = q.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        b, s, n, q_nope_dim = q_nope.size()
+        n, q_nope_dim = q_nope.shape[-2:]
 
         if q_rope is not None:  # MLA
             if not forward_batch.token_to_kv_pool.enable_kv_cache_seperated:
@@ -486,18 +492,8 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 k_nope = k_cache
                 k_rope = v_cache
 
-            if forward_batch.forward_mode.is_target_verify():
-                q_nope = q_nope.reshape(-1, self.num_draft_tokens, n, self.kv_lora_rank)
-                q_rope = q_rope.reshape(
-                    -1, self.num_draft_tokens, n, self.qk_rope_head_dim
-                )
-                sparse_mode = 3
-                atten_mask = self.attn_mask
-            else:
-                q_nope = q_nope.reshape(-1, 1, n, self.kv_lora_rank)
-                q_rope = q_rope.reshape(-1, 1, n, self.qk_rope_head_dim)
-                sparse_mode = 0
-                atten_mask = None
+            q_nope = q_nope.view(-1, n, self.kv_lora_rank)
+            q_rope = q_rope.view(-1, n, self.qk_rope_head_dim)
 
             attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                 q_nope,
@@ -507,15 +503,14 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 key_rope=k_rope,
                 num_heads=n,
                 num_key_value_heads=1,
-                input_layout="BSND",
-                atten_mask=atten_mask,
-                sparse_mode=sparse_mode,
+                input_layout="TND",
                 scale=layer.scaling,
                 antiquant_mode=0,
                 antiquant_scale=None,
-                block_table=self.forward_metadata.block_kv_indices[: q_nope.shape[0]],
+                block_table=self.forward_metadata.block_kv_indices,
                 block_size=self.page_size,
-                actual_seq_lengths_kv=self.forward_metadata.seq_lens_list,
+                actual_seq_lengths=self.forward_metadata.q_lens_list,  # cumsum
+                actual_seq_lengths_kv=self.forward_metadata.kv_lens_list,  # non-cumsum
             )
         else:  # MHA
             _, k_heads, k_dim = k_cache.size()
@@ -530,10 +525,10 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 atten_mask=None,
                 block_size=self.page_size,
                 block_table=self.forward_metadata.block_kv_indices,
-                actual_seq_lengths_kv=self.forward_metadata.seq_lens_list,
+                actual_seq_lengths_kv=self.forward_metadata.kv_lens_list,  # non-cumsum
                 scale=layer.scaling,
             )
-        attn_output = attn_output.view(b * s, layer.tp_q_head_num, layer.v_head_dim)
+        attn_output = attn_output.view(-1, layer.tp_q_head_num, layer.v_head_dim)
         return attn_output
 
 

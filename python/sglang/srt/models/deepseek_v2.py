@@ -1586,32 +1586,23 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
             latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
 
-        bsz = forward_batch.batch_size
-        q = q.view(bsz, -1, self.num_local_heads, self.qk_head_dim)
-        q_len = q.shape[1]
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )  # b,n,s,d
+        )  # b*s,n,d
 
         q_nope = q_nope.view(-1, self.num_local_heads, self.qk_nope_head_dim)
-        q_nope = (
-            torch.matmul(q_nope.transpose(0, 1), self.w_kc)
-            .transpose(0, 1)
-            .view(bsz, q_len, self.num_local_heads, self.kv_lora_rank)
-        )
+        q_nope = torch.matmul(q_nope.transpose(0, 1), self.w_kc).transpose(0, 1)
 
-        q_pe = q_pe.transpose(1, 2)
-        cos = cos.view(bsz, 1, -1, self.qk_rope_head_dim)
-        sin = sin.view(bsz, 1, -1, self.qk_rope_head_dim)
+        q_pe = q_pe.view(-1, self.num_local_heads, 1, self.qk_rope_head_dim)
+        cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+        sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
         q_pe = torch_npu.npu_interleave_rope(q_pe, cos, sin)  # (B,N,S,D)
-        q_pe = q_pe.view(
-            bsz, self.num_local_heads, -1, self.qk_rope_head_dim
-        ).transpose(1, 2)
+        q_pe = q_pe.view(cos.shape[0], self.num_local_heads, self.qk_rope_head_dim)
 
         tmp_slot_mapping = forward_batch.out_cache_loc
         latent_cache = latent_cache.view(
-            bsz * q_len, 1, 1, self.kv_lora_rank + self.qk_rope_head_dim
-        )  # (B,N,S,D)
+            -1, 1, 1, self.kv_lora_rank + self.qk_rope_head_dim
+        )  # (B*S,N,1,D)
 
         nope_cache = forward_batch.token_to_kv_pool.get_key_buffer(self.layer_id).view(
             -1,
@@ -1628,12 +1619,6 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch.attn_backend.qk_rope_head_dim,
         )
         block_num, block_size, _, _ = nope_cache.size()
-        if (
-            forward_batch.forward_mode.is_target_verify()
-            or forward_batch.forward_mode.is_draft_extend()
-        ):
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
         k_rope, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             latent_cache,
