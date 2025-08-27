@@ -2,7 +2,7 @@ name: Daily Build Test (Ascend NPU)
 
 on:
   schedule:
-    - cron: "0 2 * * *" # run at 2:00AM in TZ=Asia/Shanghai
+    - cron: "0 */6 * * *" # Trigger the daily build pipeline every 6 hours.
   push:
     branches:
       - main
