@@ -1,4 +1,4 @@
-name: nightly dev image build and push
+name: nightly dev image build and push for innersource
 
 # This workflow uses actions that are not certified by GitHub.
 # They are provided by a third-party and are governed by
@@ -8,9 +8,14 @@ name: nightly dev image build and push
 on:
   workflow_dispatch:
   workflow_call:
-
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/release-docker-ascend-nightly-innersource.yml'
+      - 'docker/Dockerfile.npu'
 concurrency:
-  group: release-docker-ascend-nightly-${{ github.ref }}
+  group: release-docker-ascend-nightly-innersource-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,7 +24,7 @@ jobs:
     strategy:
       matrix:
         cann_version: ["8.2.rc1"]
-        device_type: ["a3"]
+        device_type: ["a3", "910b"]
     steps:
       - name: Checkout repository
         if: github.event.pull_request.head.repo.full_name == github.repository
@@ -42,24 +47,28 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ vars.REGISTRY }}/base_image/ascend-ci/sglang
-          # push with schedule event
-          # push with workflow_dispatch event
+            ${{ vars.REGISTRY_HK }}/base_image/ascend-ci/sglang
+          # will generate tags with following the rules:
+          # - on PR: pr-<short-sha>
+          # - on schedule: devel-<YYYYMMDD>-<device_type> and devel-<device_type>
+          # - on manual dispatch: devel-<device_type>
+          # default tag: devel (only when device_type is a3)
           tags: |
             type=ref,event=pr,suffix=-{{sha}}
-            type=ref,event=branch
-            type=schedule,pattern=main-{{date 'YYYYMMDD'}}
-            type=schedule,pattern={{branch}}
+            type=ref,event=branch,suffix=-${{ matrix.device_type }}
+            type=schedule,pattern=main-{{date 'YYYYMMDD' tz='Asia/Shanghai'}}-${{ matrix.device_type }}
+            type=schedule,pattern=main-${{ matrix.device_type }}
+            type=raw,value=main,enable=${{ matrix.device_type == 'a3' }}
 
       # Login against a Docker registry except on PR
       # https://github.com/docker/login-action
-      - name: Log into registry ${{ env.REGISTRY }}
+      - name: Log into registry ${{ vars.REGISTRY_HK }}
         if: ${{ github.repository == 'Ascend/sglang' && github.event_name != 'pull_request' }}
         uses: docker/login-action@v3
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ vars.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          registry: ${{ vars.REGISTRY_HK }}
+          username: ${{ vars.REGISTRY_HK_USER }}
+          password: ${{ secrets.REGISTRY_HK_PASSWORD }}
 
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
@@ -78,6 +87,6 @@ jobs:
           build-args: |
             CANN_VERSION=${{ matrix.cann_version }}
             DEVICE_TYPE=${{ matrix.device_type }}
-            REGISTRY=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci
+            REGISTRY=${{ vars.REGISTRY_HK }}/base_image/ascend-ci
             PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple
             APTMIRROR=mirrors.huaweicloud.com
