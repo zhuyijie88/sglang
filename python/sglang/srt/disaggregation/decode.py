@@ -196,9 +196,15 @@ class DecodePreallocQueue:
         kv_data_ptrs, kv_data_lens, kv_item_lens = (
             self.token_to_kv_pool.get_contiguous_buf_infos()
         )
-        kv_args.kv_data_shape = self.token_to_kv_pool.get_key_buffer(0).shape
+        if self.token_to_kv_pool.enable_kv_cache_seperated:
+            kv_args.kv_data_shape = (
+                self.token_to_kv_pool.get_key_buffer(0).shape,
+                self.token_to_kv_pool.get_value_buffer(0).shape,
+            )
+        else:
+            kv_args.kv_data_shape = (self.token_to_kv_pool.get_key_buffer(0).shape,)
         kv_args.kv_data_dtype = self.token_to_kv_pool.get_key_buffer(0).dtype
-        if self.draft_token_to_kv_pool is not None:
+        if self.draft_token_to_kv_pool is not None:  # todo (zyj)
             # We should also transfer draft model kv cache. The indices are
             # always shared with a target model.
             draft_kv_data_ptrs, draft_kv_data_lens, draft_kv_item_lens = (

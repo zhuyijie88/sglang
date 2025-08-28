@@ -160,6 +160,11 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 
 
 class DataDistKVManager(CommonKVManager):
+    _socket_cache = {}
+    _socket_lock = {}
+    _global_lock = threading.Lock()
+    _ctx = zmq.Context()
+
     def __init__(
         self,
         args: KVArgs,
@@ -182,17 +187,21 @@ class DataDistKVManager(CommonKVManager):
         llm_config.sync_kv_timeout = 20000
         rank_table, self.world_size = generate_rank_table_a3(self.device_id)
         llm_config.local_comm_res = rank_table
-        # 加上个node_rank偏移保证cluster_id不冲突
-        self.cluster_id = self.device_id + self.world_size * ServerArgs.node_rank
+
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self.cluster_id = (
+                self.device_id + self.world_size * server_args.node_rank
+            ) * 2
             self.role = LLMRole.PROMPT
             # p侧监听，D侧link_clusters
             llm_config.listen_ip_info = (
                 f"{self.local_host_ip}:{26000 + self.kv_args.gpu_id}"
             )
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            self.cluster_id = (
+                self.device_id + self.world_size * server_args.node_rank
+            ) * 2 + 1
             self.role = LLMRole.DECODER
-            self.cluster_id += self.world_size * ServerArgs.nnodes
         else:
             raise ValueError(
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
@@ -231,23 +240,40 @@ class DataDistKVManager(CommonKVManager):
             self.link_clusters_dict = {}
 
     def register_buffer_to_engine(self):
-        buf_shape = self.kv_args.kv_data_shape
+        buf_shapes = self.kv_args.kv_data_shape
         # mla_backend, buf_shape should be modified by page_size
         if self.is_mla_backend:
-            dim0, dim2 = buf_shape[0], buf_shape[2]
-            buf_shape = torch.Size(
-                (dim0 // self.server_args.page_size, self.server_args.page_size, dim2)
+            new_buf_shapes = []
+            for buf_shape in buf_shapes:
+                total_num_tokens, buff_dim = buf_shape[0], buf_shape[2]
+                buf_shape = torch.Size(
+                    (
+                        total_num_tokens // self.server_args.page_size,
+                        self.server_args.page_size,
+                        buff_dim,
+                    )
+                )
+                new_buf_shapes.append(buf_shape)
+            buf_shapes = new_buf_shapes
+        buff_num = len(buf_shapes)
+        kv_data_ptrs_len = len(self.kv_args.kv_data_ptrs)
+        assert kv_data_ptrs_len % buff_num == 0
+        data_ptrs_len_per_buff = kv_data_ptrs_len // buff_num
+        for i in range(buff_num):
+            cache_desc = CacheDesc(
+                num_tensors=data_ptrs_len_per_buff,
+                shape=tuple(buf_shapes[i]),
+                data_type=TORCH_DTYPE_TO_NPU_DTYPE[self.kv_args.kv_data_dtype],
             )
-        cache_desc = CacheDesc(
-            num_tensors=len(self.kv_args.kv_data_ptrs),
-            shape=tuple(buf_shape),
-            data_type=TORCH_DTYPE_TO_NPU_DTYPE[self.kv_args.kv_data_dtype],
-        )
-        cache_addrs = self.kv_args.kv_data_ptrs
-        cache_key = BlocksCacheKey(self.cluster_id, 0)
-        self.registered_kv_caches.append(
-            self.cache_manager.register_blocks_cache(cache_desc, cache_addrs, cache_key)
-        )
+            cache_addrs = self.kv_args.kv_data_ptrs[
+                i * data_ptrs_len_per_buff : (i + 1) * data_ptrs_len_per_buff
+            ]
+            cache_key = BlocksCacheKey(self.cluster_id, i)
+            self.registered_kv_caches.append(
+                self.cache_manager.register_blocks_cache(
+                    cache_desc, cache_addrs, cache_key
+                )
+            )
 
         # metadata aux只注册output_ids
         output_ids_addr = self.kv_args.aux_data_ptrs[0]
@@ -257,7 +283,7 @@ class DataDistKVManager(CommonKVManager):
             data_type=TORCH_DTYPE_TO_NPU_DTYPE[torch.int32],
         )
         cache_addrs = [output_ids_addr]
-        cache_key = BlocksCacheKey(self.cluster_id, 1)
+        cache_key = BlocksCacheKey(self.cluster_id, len(self.registered_kv_caches))
         self.registered_kv_caches.append(
             self.cache_manager.register_blocks_cache(cache_desc, cache_addrs, cache_key)
         )
@@ -284,6 +310,8 @@ class DataDistKVManager(CommonKVManager):
                 return
             cluster_list = []
             for bootstrap_info in bootstrap_infos:
+                if bootstrap_info["is_dummy"]:
+                    continue
                 cluster = llm_datadist.LLMClusterInfo()
                 cluster.append_remote_ip_info(
                     bootstrap_info["rank_ip"], 26000 + bootstrap_info["gpu_id"]
@@ -325,18 +353,29 @@ class DataDistKVManager(CommonKVManager):
 
         threading.Thread(target=bootstrap_thread).start()
 
+    def _connect(self, endpoint: str):
+        with self._global_lock:
+            if endpoint not in self._socket_cache:
+                sock = self._ctx.socket(zmq.PUSH)
+                sock.connect(endpoint)
+                self._socket_cache[endpoint] = sock
+                self._socket_lock[endpoint] = threading.Lock()
+            return self._socket_cache[endpoint], self._socket_lock[endpoint]
+
     def sync_status_to_decode(
         self, remote: str, dst_port: int, room: int, status: int, prefill_rank: int
     ):
         if ":" in remote:
             remote = remote.split(":")[0]
-        self._connect("tcp://" + remote + ":" + str(dst_port)).send_multipart(
-            [
-                str(room).encode("ascii"),
-                str(status).encode("ascii"),
-                str(prefill_rank).encode("ascii"),
-            ]
-        )
+        sock, lock = self._connect(f"tcp://{remote}:{dst_port}")
+        with lock:
+            sock.send_multipart(
+                [
+                    str(room).encode("ascii"),
+                    str(status).encode("ascii"),
+                    str(prefill_rank).encode("ascii"),
+                ]
+            )
 
     def start_decode_thread(self):
         self.server_socket.bind(f"tcp://{self.local_host_ip}:{self.rank_port}")
@@ -381,23 +420,28 @@ class DataDistKVManager(CommonKVManager):
                 if req.is_dummy():
                     continue
                 chunked_dst_kv_indices = req.dst_kv_indices[index_slice]
-                decode_cache_key = BlocksCacheKey(req.cluster_id, 0)
-                self.cache_manager.push_blocks(
-                    decode_cache_key,
-                    self.registered_kv_caches[0],
-                    prefill_kv_indices.tolist(),
-                    chunked_dst_kv_indices.tolist(),
-                    range(len(self.kv_args.kv_data_ptrs)),
-                    range(len(self.kv_args.kv_data_ptrs)),
-                    1,
-                )
+                buff_num = len(self.kv_args.kv_data_shape)
+                kv_data_ptrs_len_per_buff = len(self.kv_args.kv_data_ptrs) // buff_num
+                for i in range(buff_num):
+                    decode_cache_key = BlocksCacheKey(req.cluster_id, i)
+                    self.cache_manager.push_blocks(
+                        decode_cache_key,
+                        self.registered_kv_caches[i],
+                        prefill_kv_indices.tolist(),
+                        chunked_dst_kv_indices.tolist(),
+                        range(kv_data_ptrs_len_per_buff),
+                        range(kv_data_ptrs_len_per_buff),
+                        1,
+                    )
 
                 # Only the last chunk we need to send the aux data.
                 if is_last:
-                    decode_cache_key = BlocksCacheKey(req.cluster_id, 1)
+                    decode_cache_key = BlocksCacheKey(
+                        req.cluster_id, len(self.registered_kv_caches) - 1
+                    )
                     self.cache_manager.push_blocks(
                         decode_cache_key,
-                        self.registered_kv_caches[1],
+                        self.registered_kv_caches[-1],
                         [prefill_aux_index],
                         [req.dst_aux_index],
                         range(1),
