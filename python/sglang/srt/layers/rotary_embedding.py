@@ -12,6 +12,7 @@ from sglang.srt.custom_op import CustomOp
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
+    get_compiler_backend,
     is_cpu,
     is_cuda,
     is_hip,
@@ -1029,7 +1030,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                     f"Corrected mrope_section: {self.mrope_section} (sum={sum(self.mrope_section)})"
                 )
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=get_compiler_backend())
     def forward(
         self,
         positions: torch.Tensor,
