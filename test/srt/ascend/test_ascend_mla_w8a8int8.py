@@ -39,7 +39,7 @@ class TestAscendMlaW8A8Int8(CustomTestCase):
             "--quantization",
             "w8a8_int8",
             "--tp-size",
-            4,
+            2,
             "--disable-radix-cache",
             "--chunked-prefill-size",
             32768,
