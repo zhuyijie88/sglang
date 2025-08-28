@@ -281,9 +281,10 @@ suite_ascend = {
         TestFile("ascend/test_ascend_graph_tp2_bf16.py", 400),
         TestFile("ascend/test_ascend_tp2_fia_bf16.py", 400),
         TestFile("ascend/test_ascend_mla_fia_w8a8int8.py", 400),
+        TestFile("ascend/test_ascend_mla_w8a8int8.py", 400),
     ],
     "per-commit-4-ascend-npu": [
-        TestFile("ascend/test_ascend_mla_w8a8int8.py", 400),
+        # TestFile("ascend/test_ascend_mla_w8a8int8.py", 400),
     ],
 }
 
