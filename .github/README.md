@@ -73,10 +73,10 @@ SGLang社区当前已对不同厂商、多个类型的硬件做到原生支持�
 
 | 子领域    | 责任人         | 责任                                                                               |
 | ------ | ----------- | -------------------------------------------------------------------------------- |
-| 基础设施运营 | @pkking     | ①社区基础设施工程搭建及接入、门禁搭建<br>②发布工程搭建及接入 <br>③公司内部推理基础设施部署试运行及推广（Hidev、AI for coding） |
-| 版本发布   | @Right2Left | ①按照内部对齐基线，发布RoadMap至社区<br> ②Docker镜像每日Dev可用，发布节奏与社区匹配                           |
-| 项目拓展及支持   | @raintBN-91 | ①头部客户/ISV联合解决方案规划、设计、开发、验证；重大市场项目支持（拓展、PoC）|
-| 社区运营   | @zoezhangMS  | ①项目运营推广、开发者拓展等<br>②社区流程运作支撑<br>③三方社区合作，如verl等         |
+| 基础设施运营 | @jlcoo  | ①社区基础设施工程搭建及接入、门禁搭建<br>②发布工程搭建及接入 <br>③公司内部推理基础设施部署试运行及推广（Hidev、AI for coding） |
+| 版本发布 | @Right2Left | ①按照内部对齐基线，发布RoadMap至社区<br> ②Docker镜像每日Dev可用，发布节奏与社区匹配                           |
+| 项目拓展及支持 | @raintBN-91 | ①头部客户/ISV联合解决方案规划、设计、开发、验证；重大市场项目支持（拓展、PoC）|
+| 社区运营 | @zoezhangMS  | ①项目运营推广、开发者拓展等<br>②社区流程运作支撑<br>③三方社区合作，如verl等         |
 | 高校合作及赋能   | @raintBN-91  |①高校合作、与相关高校教授联合开展课题<br> ②课程赋能：设计课程赋能资料   |
 | 社区运维   | @zhaoming   | ①制定SLA响应矩阵，保证24h响应<br> ②收集github、gitcode等社区的问题，处理社区日常issue，快速响应，解决客户问题   |
 | 资料运营   | @shentong   | ①内源主页、社区主页宣传运营<br> ②部署、配套资料社区发布、运营    |
@@ -98,3 +98,80 @@ SGLang社区当前已对不同厂商、多个类型的硬件做到原生支持�
 
 - [我要提交问题、需求](https://github.com/sgl-project/sglang/issues)
 - [我要参与内源社区公开会议]()
+
+## CI
+
+SGLang的CI基于[github action](https://docs.github.com/en/actions)搭建，所有的CI，每日测试和版本构建发布都在[workflows](./workflows)目录中
+
+### CI是如何运行的
+
+请参考github action [文档](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#on)，CI通过在github action的yaml中指定特定的事件实现任务的触发
+
+#### 如何选择CI运行的环境
+
+当前SGLang CI提供了如下几种[self hosted runner](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
+
+可以通过指定`workflows目录里的yaml`里的 `runs-on`字段来明确CI的运行环境
+
+| runs-on的值  |  环境描述 |
+| ------ | ----------- |
+| linux-aarch64-a3-1 | 单卡的A3环境 |
+| linux-aarch64-a3-2 | 2卡的A3环境 |
+| linux-aarch64-a3-4 | 4卡的A3环境 |
+| linux-aarch64-a3-4 | 8卡的A3环境 |
+| linux-aarch64-a2b4-1 | 1卡的910B4环境(32G显存) |
+| linux-aarch64-a2b4-2 | 2卡的910B4环境(32G显存) |
+| linux-aarch64-a2b4-3 | 3卡的910B4环境(32G显存) |
+| linux-aarch64-a2b4-4 | 4卡的910B4环境(32G显存) |
+| self-hosted-x86 | 一台8C16G的x86设备，主要用于构建docker image |
+| self-hosted-arm64 | 一台8C16G的arm64设备，主要用于构建docker image |
+
+### CI运行过程中，模型是存储在哪里的
+
+SGLang所有带NPU的环境，都在 `/root/.cache` 目录下挂载了共享存储，用于存放从[modelscope](https://modelscope.cn)下载的模型，目录结构和modelscope的默认缓存目录一直，因此在设置了`SGLANG_USE_MODELSCOPE`时，可以自动使用这里已经缓存的模型
+
+
+### CI的模型/缓存目录怎么新增模型
+
+本仓库通过 一个定期下载模型和数据集的[workflow](./workflows/sync-models-datasets.yml) 来实现模型和数据集的自动下载
+
+可以通过修改[pre-downloaded-datasets](./workflows/pre-downloaded-datasets.ini)和[pre-downloaded-models](./workflows/pre-downloaded-models.ini)
+
+当前的触发节奏是6小时，当修改对应的ini文件的PR合入时，也会触发
+
+### CI构建发布的镜像从哪里可以下载
+
+每日构建的镜像会发布到华为云SWR香港和贵阳站点：
+```bash
+# 贵阳节点，适合国内用户
+docker pull swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+
+# 香港站点，适合海外用户
+docker pull swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+```
+
+### 镜像的tag原则
+
+当前docker 镜像的tag的原则可以参考[这里](./workflows/release-docker-ascend-nightly-innersource.yml)
+
+每天会发布a3和910b的镜像
+
+### 内院仓workflow编写规则
+
+- 为了减少本仓库和[sglang上游](https://github.com/sgl-project/sglang)的冲突，建议本仓库的workflow不要覆盖已经存在的非上游`workflow`
+- 新增的内源workflow以`-innersource.yaml`作为结尾
+- 内源workflow中，建议统一增加`if: github.repository == 'Ascend/sglang' `的判断，避免在您fork的仓库里运行
+
+### CI任务常见异常
+
+Q：期望增加新的硬件类型
+A：可以联系基础设施接口人
+
+Q：CI一直处于pending（黄色未转圈）状态
+A：可能是NPU资源满载了，如果超过1小时还未启动，可以联系基础设施接口人
+
+Q：CI测试运行失败
+A：可以联系对应的开发责任人定位
+
+Q：docker image构建失败
+A：可以联系社区运维处理

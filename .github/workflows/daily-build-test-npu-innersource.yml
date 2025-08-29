@@ -1,4 +1,4 @@
-name: Daily Build Test (Ascend NPU)
+name: Daily Build Test Innersource (Ascend NPU)
 
 on:
   schedule:
@@ -9,6 +9,11 @@ on:
     paths:
       - "python/sglang/version.py"
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/daily-build-test-npu-innersource.yml"
 
 concurrency:
   group: daily-build-test-npu-${{ github.ref }}
@@ -16,6 +21,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'Ascend/sglang'
     uses: ./.github/workflows/release-docker-ascend-nightly-innersource.yml
     secrets: inherit
 
@@ -24,7 +30,7 @@ jobs:
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-2
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+      image: ${{ vars.REGISTRY_HK }}/base_image/ascend-ci/sglang:main
     steps:
       - name: Pre-config git access token
         run: |
@@ -60,7 +66,7 @@ jobs:
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+      image: ${{ vars.REGISTRY_HK }}/base_image/ascend-ci/sglang:main
     steps:
       - name: Pre-config git access token
         run: |
@@ -96,7 +102,7 @@ jobs:
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-8
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/sglang:main
+      image: ${{ vars.REGISTRY_HK }}/base_image/ascend-ci/sglang:main
     steps:
       - name: Pre-config git access token
         run: |
