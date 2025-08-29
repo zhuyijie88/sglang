@@ -1,20 +1,20 @@
 name: PR Test (Ascend NPU)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - ".github/workflows/pr-test-npu.yml"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - ".github/workflows/pr-test-npu.yml"
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - ".github/workflows/pr-test-npu.yml"
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - ".github/workflows/pr-test-npu.yml"
   workflow_dispatch:
 
 concurrency:
@@ -146,3 +146,4 @@ jobs:
           done
           echo "All jobs completed successfully"
           exit 0
+

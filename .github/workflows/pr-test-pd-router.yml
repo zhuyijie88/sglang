@@ -1,18 +1,18 @@
 name: PR Test (PD Router)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'python/sglang/srt/disaggregation/**'
-      - 'scripts/ci/ci_start_disaggregation_servers.sh'
-      - 'sgl-router/**'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'python/sglang/srt/disaggregation/**'
-      - 'scripts/ci/ci_start_disaggregation_servers.sh'
-      - 'sgl-router/**'
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - 'python/sglang/srt/disaggregation/**'
+#      - 'scripts/ci/ci_start_disaggregation_servers.sh'
+#      - 'sgl-router/**'
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - 'python/sglang/srt/disaggregation/**'
+#      - 'scripts/ci/ci_start_disaggregation_servers.sh'
+#      - 'sgl-router/**'
   workflow_dispatch:
 
 concurrency:

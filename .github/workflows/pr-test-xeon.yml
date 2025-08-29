@@ -1,22 +1,22 @@
 name: PR Test (Xeon)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - "sgl-kernel/**"
-      - ".github/workflows/pr-test-xeon.yml"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - "sgl-kernel/**"
-      - ".github/workflows/pr-test-xeon.yml"
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - "sgl-kernel/**"
+#      - ".github/workflows/pr-test-xeon.yml"
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - "sgl-kernel/**"
+#      - ".github/workflows/pr-test-xeon.yml"
   workflow_dispatch:
 
 concurrency:

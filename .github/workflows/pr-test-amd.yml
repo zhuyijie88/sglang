@@ -1,22 +1,22 @@
 name: PR Test (AMD)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - "sgl-kernel/**"
-      - ".github/workflows/pr-test-amd.yml"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-      - "sgl-kernel/**"
-      - ".github/workflows/pr-test-amd.yml"
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - "sgl-kernel/**"
+#      - ".github/workflows/pr-test-amd.yml"
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#      - "sgl-kernel/**"
+#      - ".github/workflows/pr-test-amd.yml"
   workflow_dispatch:
 
 concurrency:

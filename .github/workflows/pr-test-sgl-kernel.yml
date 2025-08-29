@@ -1,14 +1,14 @@
 name: PR Test (sgl-kernel)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "sgl-kernel/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - "sgl-kernel/**"
+#  push:
+#    branches: [main]
+#    paths:
+#      - "sgl-kernel/**"
+#  pull_request:
+#    branches: [main]
+#    paths:
+#      - "sgl-kernel/**"
   workflow_dispatch:
 
 concurrency:

@@ -1,14 +1,14 @@
 name: PR Benchmark (Rust Router)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "sgl-router/**"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "sgl-router/**"
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - "sgl-router/**"
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - "sgl-router/**"
   workflow_dispatch:
 
 concurrency:

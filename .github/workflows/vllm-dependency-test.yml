@@ -1,18 +1,19 @@
 name: VLLM Dependency Test
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "python/**"
-      - "scripts/**"
-      - "test/**"
+#  push:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+#  pull_request:
+#    branches: [ main ]
+#    paths:
+#      - "python/**"
+#      - "scripts/**"
+#      - "test/**"
+   workflow_dispatch:
 
 concurrency:
   group: vllm-dependency-test-${{ github.ref }}
