@@ -50,7 +50,7 @@ jobs:
           curl -o /tmp/test.jsonl -L https://gh-proxy.test.osinfra.cn/https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
 
       - name: Run test
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           SGLANG_USE_MODELSCOPE: true
           SGLANG_IS_IN_CI: true
@@ -65,6 +65,10 @@ jobs:
     needs: [ build ]
     if: ${{ needs.build.result == 'success' && (github.repository == 'Ascend/sglang' || github.event_name == 'pull_request') }}
     runs-on: linux-aarch64-a3-4
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1]
     container:
       image: ${{ vars.REGISTRY_HK }}/base_image/ascend-ci/sglang:main
     steps:
@@ -86,7 +90,7 @@ jobs:
           curl -o /tmp/test.jsonl -L https://gh-proxy.test.osinfra.cn/https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
 
       - name: Run test
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           SGLANG_USE_MODELSCOPE: true
           SGLANG_IS_IN_CI: true
@@ -95,7 +99,7 @@ jobs:
           STREAMS_PER_DEVICE: 32
         run: |
           cd test/srt
-          python3 run_suite.py --suite per-commit-2-ascend-npu --timeout-per-file 3600
+          python3 run_suite.py --suite per-commit-2-ascend-npu --timeout-per-file 3600 --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 
   build-test-4-ascend-npu:
     needs: [ build ]
