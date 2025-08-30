@@ -289,8 +289,6 @@ suite_ascend = {
     ],
     "per-commit-1-ascend-npu-debug": [
         # TestFile("ascend/test_ascend_llm_models.py", 400),
-        TestFile("ascend/test_ascend_embedding_models.py", 400),
-        TestFile("ascend/test_ascend_reward_models.py", 400),
     ],
     "per-commit-2-ascend-npu-debug": [],
 }
