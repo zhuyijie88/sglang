@@ -1,11 +1,11 @@
 name: Execute Notebooks
 
 on:
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "python/sglang/**"
-      - "docs/**"
+  # pull_request:
+  #   branches: [ main ]
+  #   paths:
+  #     - "python/sglang/**"
+  #     - "docs/**"
   workflow_dispatch:
 
 
