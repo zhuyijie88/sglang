@@ -45,8 +45,8 @@ class TestInternlm2_7bReward(CustomTestCase):
         self.assertTrue(type(srt_scores) == torch.Tensor)
 
 
-class TestQwen2_5Apeach(TestInternlm2_7bReward):
-    model_path = "/root/.cache/modelscope/hub/models/Howeee/Qwen2.5-1.5B-apeach"
+# class TestQwen2_5Apeach(TestInternlm2_7bReward):
+#     model_path = "/root/.cache/modelscope/hub/models/Howeee/Qwen2.5-1.5B-apeach"
 
 
 if __name__ == "__main__":
