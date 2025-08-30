@@ -286,6 +286,10 @@ suite_ascend = {
     "per-commit-4-ascend-npu": [
         # TestFile("ascend/test_ascend_mla_w8a8int8.py", 400),
     ],
+    "per-commit-1-ascend-npu-debug": [
+        TestFile("ascend/test_ascend_llm_models.py", 400),
+    ],
+    "per-commit-2-ascend-npu-debug": [],
 }
 
 suites.update(suite_amd)
