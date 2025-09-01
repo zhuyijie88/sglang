@@ -128,7 +128,7 @@ SGLang的CI基于[github action](https://docs.github.com/en/actions)搭建，所
 
 ### CI运行过程中，模型是存储在哪里的
 
-SGLang所有带NPU的环境，都在 `/root/.cache` 目录下挂载了共享存储，用于存放从[modelscope](https://modelscope.cn)下载的模型，目录结构和modelscope的默认缓存目录一直，因此在设置了`SGLANG_USE_MODELSCOPE`时，可以自动使用这里已经缓存的模型
+SGLang所有带NPU的环境，都在 `/root/.cache` 目录下挂载了共享存储，用于存放从[modelscope](https://modelscope.cn)下载的模型。由于目录结构和modelscope的默认缓存目录一致，因此在设置了`SGLANG_USE_MODELSCOPE`时，可以自动使用这里已经缓存的模型
 
 
 ### CI的模型/缓存目录怎么新增模型
@@ -156,7 +156,7 @@ docker pull swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/sglang:mai
 
 每天会发布a3和910b的镜像
 
-### 内院仓workflow编写规则
+### 内源仓workflow编写规则
 
 - 为了减少本仓库和[sglang上游](https://github.com/sgl-project/sglang)的冲突，建议本仓库的workflow不要覆盖已经存在的非上游`workflow`
 - 新增的内源workflow以`-innersource.yaml`作为结尾
