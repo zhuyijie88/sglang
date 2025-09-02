@@ -23,6 +23,8 @@ import os
 
 import numpy as np
 
+_use_mlapo = get_bool_env_var("SGLANG_USE_MLAPO")
+
 
 @dataclass
 class ForwardMetadata:
@@ -66,7 +68,6 @@ class AscendAttnBackend(AttentionBackend):
         if self.use_mla:
             self.kv_lora_rank = model_runner.model_config.kv_lora_rank
             self.qk_rope_head_dim = model_runner.model_config.qk_rope_head_dim
-            self.native_attn = TorchNativeAttnBackend(model_runner)
         self.graph_metadata = {}
         self.max_context_len = model_runner.model_config.context_len
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
@@ -366,7 +367,7 @@ class AscendAttnBackend(AttentionBackend):
                 antiquant_scale=None,
                 sparse_mode=0,
             )
-            output = torch.zeros_like(q_nope, dtype=q.dtype, device=q.device)
+            output = torch.empty_like(q_nope, dtype=q.dtype, device=q.device)
             softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
 
             torch_npu.npu_fused_infer_attention_score.out(
@@ -402,6 +403,9 @@ class AscendAttnBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
+        if _use_mlapo:
+            save_kv_cache = False
+
         if self.graph_mode:
             return self.forward_decode_graph(
                 q,

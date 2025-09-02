@@ -117,7 +117,6 @@ def npu_fused_experts(
 ):
     original_shape = hidden_states.shape
     original_dtype = hidden_states.dtype
-    scale_dtype = original_dtype if original_dtype == torch.bfloat16 else torch.float32
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     num_tokens = hidden_states.shape[0]
@@ -143,7 +142,7 @@ def npu_fused_experts(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w13],
-        scale=[w13_scale.to(scale_dtype)],
+        scale=[w13_scale],
         per_token_scale=[pertoken_scale],
         split_item=2,
         group_list_type=0,
@@ -158,7 +157,7 @@ def npu_fused_experts(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w2],
-        scale=[w2_scale.to(scale_dtype)],
+        scale=[w2_scale],
         per_token_scale=[pertoken_scale],
         split_item=2,
         group_list_type=0,
@@ -620,6 +619,8 @@ class NPU_W8A8LinearMethodImpl:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        # cast linear weight to nz format
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
 
 
 class NPU_W8A8LinearMethodMTImpl:
@@ -910,7 +911,7 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
         )
-
+        scale_dtype = params_dtype if params_dtype == torch.bfloat16 else torch.float32
         # weight
         w13_weight = torch.nn.Parameter(
             torch.empty(
@@ -928,13 +929,13 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight, extra_weight_attrs)
         # scale
         w13_weight_scale = torch.nn.Parameter(
-            torch.empty(num_experts, 2 * intermediate_size, 1, dtype=torch.float32),
+            torch.empty(num_experts, 2 * intermediate_size, 1, dtype=scale_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         w2_weight_scale = torch.nn.Parameter(
-            torch.empty(num_experts, hidden_size, 1, dtype=torch.float32),
+            torch.empty(num_experts, hidden_size, 1, dtype=scale_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
@@ -972,6 +973,8 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         layer.w2_weight_offset = Parameter(
             layer.w2_weight_offset.data.squeeze(-1).contiguous(), requires_grad=False
         )
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 29)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 29)
 
     def apply(
         self,

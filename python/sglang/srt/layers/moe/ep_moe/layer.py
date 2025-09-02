@@ -823,7 +823,7 @@ class DeepEPMoE(EPMoE):
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
                 weight=[self.w2_weight],
-                scale=[self.w2_weight_scale.to(output_dtype)],
+                scale=[self.w2_weight_scale],
                 per_token_scale=[swiglu_out_scale],
                 split_item=2,
                 group_list_type=group_list_type,
