@@ -35,7 +35,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import DynamicGradMode, get_compiler_backend
+from sglang.srt.utils import DynamicGradMode, get_compiler_backend, is_npu
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,8 @@ class TpModelWorkerClient:
 
     def forward_thread_func(self):
         try:
+            if is_npu():
+                torch.npu.set_device(self.device)
             with torch.get_device_module(self.device).stream(self.forward_stream):
                 self.forward_thread_func_()
         except Exception:

@@ -235,6 +235,7 @@ class ReplicatedLinear(LinearBase):
                     loaded_weight = loaded_weight[:1]
                 else:
                     raise ValueError(f"{loaded_weight} are not all equal")
+            torch.npu.set_device(param.device)
         assert (
             param.size() == loaded_weight.size()
         ), f"Loading weight error:  param: {param.size()}, loaded_weight: {loaded_weight.size()}"
@@ -393,6 +394,8 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
+        if _is_npu:
+            torch.npu.set_device(param_data.device)
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
@@ -1279,6 +1282,8 @@ class RowParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
+        if _is_npu:
+            torch.npu.set_device(param_data.device)
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):

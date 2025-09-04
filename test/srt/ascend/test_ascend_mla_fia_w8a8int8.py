@@ -43,9 +43,14 @@ class TestAscendMlaW8A8Int8(CustomTestCase):
             2,
             "--disable-radix-cache",
         ]
+        os.environ["ASCEND_USE_FIA"] = "true"
+
+    @classmethod
+    def tearDownClass(cls):
+        if "ASCEND_USE_FIA" in os.environ:
+            del os.environ["ASCEND_USE_FIA"]
 
     def test_a_gsm8k(self):
-        os.environ["ASCEND_USE_FIA"] = "true"
         for model in self.models:
             with self.subTest(model=model):
                 print(f"##=== Testing accuracy: {model} ===##")

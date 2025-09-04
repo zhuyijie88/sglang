@@ -134,6 +134,7 @@ _use_ag_after_qlora = get_bool_env_var("SGLANG_USE_AG_AFTER_QLORA")
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _device_sm = get_device_sm()
+_NPU_KV_CACHE_NZ_DIM = 16
 
 if _is_cuda:
     from sgl_kernel import (
@@ -1270,7 +1271,11 @@ class DeepseekV2AttentionMLA(nn.Module):
                 k_rope_offset=None,
                 c_kv_offset=None,
                 epsilon=self.kv_a_layernorm.variance_epsilon,
-                cache_mode="PA_BNSD",
+                cache_mode=(
+                    "PA_NZ"
+                    if forward_batch.attn_backend.use_fia and self.num_local_heads >= 8
+                    else "PA_BNSD"
+                ),
                 is_output_kv=True,
             )  # adapter NZ
             k_pe = k_pe.reshape(B, -1, self.qk_rope_head_dim)
@@ -1336,32 +1341,35 @@ class DeepseekV2AttentionMLA(nn.Module):
             q, latent_cache = fused_qkv_a_proj_out.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
             )
-            k_nope = latent_cache[..., : self.kv_lora_rank]
 
-            # overlap qk norm
-            if self.alt_stream is not None and get_is_capture_mode():
-                current_stream = torch.cuda.current_stream()
-                self.alt_stream.wait_stream(current_stream)
-                q = self.q_a_layernorm(q)
-                with torch.cuda.stream(self.alt_stream):
-                    k_nope = self.kv_a_layernorm(k_nope)
-                current_stream.wait_stream(self.alt_stream)
-            else:
-                q = self.q_a_layernorm(q)
-                k_nope = self.kv_a_layernorm(k_nope)
+            if not _is_npu:
+                k_nope = latent_cache[..., : self.kv_lora_rank]
 
-            k_nope = k_nope.unsqueeze(1)
+                # overlap qk norm
+                if self.alt_stream is not None and get_is_capture_mode():
+                    current_stream = torch.cuda.current_stream()
+                    self.alt_stream.wait_stream(current_stream)
+                    q = self.q_a_layernorm(q)
+                    with torch.cuda.stream(self.alt_stream):
+                        k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
+                    current_stream.wait_stream(self.alt_stream)
+                else:
+                    q = self.q_a_layernorm(q)
+                    k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
+            else:  # not compute k_nope when is npu
+                q = self.q_a_layernorm(q)
+
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
             latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-            k_nope = latent_cache[..., : self.kv_lora_rank]
-            k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
+            if not _is_npu:
+                k_nope = latent_cache[..., : self.kv_lora_rank]
+                k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
 
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        k_pe = latent_cache[..., self.kv_lora_rank :].unsqueeze(1)
 
         if self.use_deep_gemm_bmm:
             q_nope_val, q_nope_scale, masked_m, expected_m, aligned_m = (
@@ -1397,8 +1405,58 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         q_nope_out = q_nope_out.transpose(0, 1)
 
-        if not self._fuse_rope_for_trtllm_mla(forward_batch):
-            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe, layer_id=self.layer_id)
+        if _is_npu:
+            cos, sin = self.rotary_emb.get_cos_sin_cache(
+                positions, self.layer_id, hidden_states.dtype, offsets=None
+            )  # [-1, 1, 1, head_dim]
+            q_pe = q_pe.view(-1, self.num_local_heads, 1, self.qk_rope_head_dim)
+            q_pe = torch_npu.npu_interleave_rope(q_pe, cos, sin)  # (B,N,S,D)
+            q_pe = q_pe.view(cos.shape[0], self.num_local_heads, self.qk_rope_head_dim)
+
+            latent_cache = latent_cache.view(
+                -1, 1, 1, self.kv_lora_rank + self.qk_rope_head_dim
+            )  # (B*S,N,1,D)
+            ckv_cache, k_rope_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
+                self.layer_id
+            )  # [num_pages, page_size, 1, dim]
+            if forward_batch.attn_backend.use_fia and self.num_local_heads >= 8:
+                cache_mode = "PA_NZ"
+            else:
+                cache_mode = "PA_BNSD"
+            k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+                latent_cache,
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                forward_batch.out_cache_loc.to(torch.int64),
+                k_rope_cache,
+                ckv_cache,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+                cache_mode=cache_mode,
+            )
+            if cache_mode == "PA_NZ":
+                # adapter nz
+                block_num, block_size, _, _ = ckv_cache.size()
+                k_nope = k_nope.view(
+                    block_num,
+                    1,
+                    self.kv_lora_rank // _NPU_KV_CACHE_NZ_DIM,
+                    block_size,
+                    _NPU_KV_CACHE_NZ_DIM,
+                )
+                k_pe = k_pe.view(
+                    block_num,
+                    1,
+                    self.qk_rope_head_dim // _NPU_KV_CACHE_NZ_DIM,
+                    block_size,
+                    _NPU_KV_CACHE_NZ_DIM,
+                )
+        else:
+            k_pe = latent_cache[..., self.kv_lora_rank :].unsqueeze(1)
+            if not self._fuse_rope_for_trtllm_mla(forward_batch):
+                q_pe, k_pe = self.rotary_emb(
+                    positions, q_pe, k_pe, layer_id=self.layer_id
+                )
 
         return q_pe, k_pe, q_nope_out, k_nope, forward_batch, zero_allocator
 
@@ -1418,6 +1476,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                     "cos_sin_cache": self.rotary_emb.cos_sin_cache,
                     "is_neox": self.rotary_emb.is_neox_style,
                 }
+            extra_args["save_kv_cache"] = not _is_npu
             attn_output = self.attn_mqa(
                 q_nope_out,
                 k_nope,

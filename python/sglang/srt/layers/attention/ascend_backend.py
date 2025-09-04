@@ -23,8 +23,6 @@ import os
 
 import numpy as np
 
-_use_mlapo = get_bool_env_var("SGLANG_USE_MLAPO")
-
 
 @dataclass
 class ForwardMetadata:
@@ -197,8 +195,6 @@ class AscendAttnBackend(AttentionBackend):
             or forward_batch.forward_mode.is_draft_extend()
             or forward_batch.forward_mode.is_draft_extend_v2()
         ):
-            if _use_mlapo:
-                save_kv_cache = False
             return self.forward_mtp(
                 q,
                 k,
@@ -307,7 +303,6 @@ class AscendAttnBackend(AttentionBackend):
     ):
         if save_kv_cache:
             if self.use_mla:
-                k = k.view(-1, layer.tp_k_head_num, self.kv_lora_rank)
                 k_rope = k_rope.view(-1, layer.tp_k_head_num, self.qk_rope_head_dim)
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, forward_batch.out_cache_loc, k, k_rope
@@ -317,13 +312,18 @@ class AscendAttnBackend(AttentionBackend):
                     layer, forward_batch.out_cache_loc, k, v
                 )
 
-        c_kv, k_rope = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-        k_rope_cache = k_rope.view(
-            -1, layer.tp_k_head_num, self.page_size, self.qk_rope_head_dim
-        )
-        c_kv_cache = c_kv.view(
-            -1, layer.tp_v_head_num, self.page_size, self.kv_lora_rank
-        )
+            c_kv, k_rope = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+            k_rope_cache = k_rope.view(
+                -1, layer.tp_k_head_num, self.page_size, self.qk_rope_head_dim
+            )
+            c_kv_cache = c_kv.view(
+                -1, layer.tp_v_head_num, self.page_size, self.kv_lora_rank
+            )
+        else:
+            if self.use_mla:
+                k_rope_cache, c_kv_cache = k_rope, k
+            else:
+                k_rope_cache, c_kv_cache = v, k
 
         q_nope = q.view(-1, layer.tp_q_head_num, self.kv_lora_rank)
         q_rope = q_rope.view(-1, layer.tp_q_head_num, self.qk_rope_head_dim)
@@ -342,45 +342,32 @@ class AscendAttnBackend(AttentionBackend):
             self.speculative_num_draft_tokens + q_nope.shape[0],
             self.speculative_num_draft_tokens,
         )
+        fa_inputs = {
+            "query": q_nope,
+            "key": c_kv_cache,
+            "value": c_kv_cache,
+            "query_rope": q_rope,
+            "key_rope": k_rope_cache,
+            "num_heads": layer.tp_q_head_num,
+            "num_key_value_heads": layer.tp_k_head_num,
+            "input_layout": "TND",
+            "scale": layer.scaling,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "block_table": self.forward_metadata.block_tables,
+            "block_size": self.page_size,
+            "sparse_mode": 3,
+            "atten_mask": self.mtp_mask,
+            "actual_seq_lengths": actual_seq_lengths,
+            "actual_seq_lengths_kv": actual_seq_lengths_kv,
+        }
         workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-            q_nope,
-            c_kv_cache,
-            c_kv_cache,
-            query_rope=q_rope,
-            key_rope=k_rope_cache,
-            num_heads=layer.tp_q_head_num,
-            num_key_value_heads=layer.tp_k_head_num,
-            input_layout="TND",
-            scale=layer.scaling,
-            antiquant_mode=0,
-            antiquant_scale=None,
-            block_table=self.forward_metadata.block_tables,
-            block_size=self.page_size,
-            sparse_mode=3,
-            atten_mask=self.mtp_mask,
-            actual_seq_lengths=actual_seq_lengths,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            **fa_inputs
         )
         attn_output = torch.empty_like(q_nope, dtype=q.dtype, device=q.device)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
         torch_npu.npu_fused_infer_attention_score.out(
-            q_nope,
-            c_kv_cache,
-            c_kv_cache,
-            query_rope=q_rope,
-            key_rope=k_rope_cache,
-            num_heads=layer.tp_q_head_num,
-            num_key_value_heads=layer.tp_k_head_num,
-            input_layout="TND",
-            scale=layer.scaling,
-            antiquant_mode=0,
-            antiquant_scale=None,
-            block_table=self.forward_metadata.block_tables,
-            block_size=self.page_size,
-            sparse_mode=3,
-            atten_mask=self.mtp_mask,
-            actual_seq_lengths=actual_seq_lengths,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            **fa_inputs,
             workspace=workspace,
             out=[attn_output, softmax_lse],
         )
@@ -411,18 +398,11 @@ class AscendAttnBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
-        if save_kv_cache:
-            if self.use_mla:
-                k = k.view(-1, layer.tp_k_head_num, self.kv_lora_rank)
-                k_rope = k_rope.view(-1, layer.tp_k_head_num, self.qk_rope_head_dim)
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer, forward_batch.out_cache_loc, k, k_rope
-                )
-            else:
+        if not self.use_mla:
+            if save_kv_cache:
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, forward_batch.out_cache_loc, k, v
                 )
-        if not self.use_mla:
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(
                 layer.layer_id
             ).view(-1, self.page_size, layer.tp_k_head_num * layer.qk_head_dim)
@@ -471,16 +451,25 @@ class AscendAttnBackend(AttentionBackend):
             )
             return output.view(num_tokens, layer.tp_q_head_num * layer.v_head_dim)
         else:
-            c_kv, k_rope = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-            k_rope_cache = k_rope.view(
-                -1, layer.tp_k_head_num, self.page_size, self.qk_rope_head_dim
-            )
-            c_kv_cache = c_kv.view(
-                -1, layer.tp_v_head_num, self.page_size, self.kv_lora_rank
-            )
+            if save_kv_cache:
+                k_rope = k_rope.view(-1, layer.tp_k_head_num, self.qk_rope_head_dim)
+                forward_batch.token_to_kv_pool.set_kv_buffer(
+                    layer, forward_batch.out_cache_loc, k, k_rope
+                )
+                c_kv_cache, k_rope_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
+                    layer.layer_id
+                )
+                k_rope_cache = k_rope_cache.view(
+                    -1, self.page_size, layer.tp_k_head_num * self.qk_rope_head_dim
+                )
+                c_kv_cache = c_kv_cache.view(
+                    -1, self.page_size, layer.tp_v_head_num * self.kv_lora_rank
+                )
+            else:
+                k_rope_cache, c_kv_cache = k_rope, k
 
-            q_nope = q.view(-1, layer.tp_q_head_num, 1, self.kv_lora_rank)
-            q_rope = q_rope.view(-1, layer.tp_q_head_num, 1, self.qk_rope_head_dim)
+            q_nope = q.view(-1, 1, layer.tp_q_head_num, self.kv_lora_rank)
+            q_rope = q_rope.view(-1, 1, layer.tp_q_head_num, self.qk_rope_head_dim)
             if self.forward_metadata.seq_lens_cpu_int is None:
                 actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
             else:
@@ -498,7 +487,7 @@ class AscendAttnBackend(AttentionBackend):
                 num_key_value_heads=layer.tp_k_head_num,
                 block_table=self.forward_metadata.block_tables,
                 block_size=self.page_size,
-                input_layout="BNSD",
+                input_layout="BSND",
                 scale=layer.scaling,
                 actual_seq_lengths_kv=actual_seq_len_kv,
                 antiquant_mode=0,
@@ -518,7 +507,7 @@ class AscendAttnBackend(AttentionBackend):
                 num_key_value_heads=layer.tp_k_head_num,
                 block_table=self.forward_metadata.block_tables,
                 block_size=self.page_size,
-                input_layout="BNSD",
+                input_layout="BSND",
                 scale=layer.scaling,
                 actual_seq_lengths_kv=actual_seq_len_kv,
                 antiquant_mode=0,
@@ -527,7 +516,7 @@ class AscendAttnBackend(AttentionBackend):
                 workspace=workspace,
                 out=[output, softmax_lse],
             )
-            return output.view(-1, layer.tp_q_head_num * self.kv_lora_rank)
+            return output.reshape(-1, layer.tp_q_head_num * self.kv_lora_rank)
 
     def forward_decode(
         self,
@@ -541,9 +530,6 @@ class AscendAttnBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
-        if _use_mlapo:
-            save_kv_cache = False
-
         if self.graph_mode:
             return self.forward_decode_graph(
                 q,
@@ -613,18 +599,9 @@ class AscendAttnBackend(AttentionBackend):
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, forward_batch.out_cache_loc, k, k_rope
                 )
-            num_tokens = q.shape[0]
-            kv_c = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
-            k_pe = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
 
             if self.use_fia and (layer.tp_q_head_num // layer.tp_k_head_num) >= 8:
                 """layer.tp_q_head_num // layer.tp_k_head_num < 8 will support in the later version of CANN"""
-                kv_c = kv_c.view(
-                    -1, self.page_size, layer.tp_k_head_num * self.kv_lora_rank
-                )
-                k_pe = k_pe.view(
-                    -1, self.page_size, layer.tp_k_head_num * self.qk_rope_head_dim
-                )
                 q = q.view(
                     forward_batch.batch_size, -1, layer.tp_q_head_num, self.kv_lora_rank
                 )
@@ -634,6 +611,7 @@ class AscendAttnBackend(AttentionBackend):
                     layer.tp_q_head_num,
                     self.qk_rope_head_dim,
                 )
+                kv_c, k_pe = k, k_rope
                 attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                     q,
                     kv_c,
@@ -656,8 +634,11 @@ class AscendAttnBackend(AttentionBackend):
                 assert (
                     self.graph_mode == False
                 )  # _npu_paged_attention_mla not support graph mode
+                num_tokens = q.shape[0]
                 q = torch.cat([q, q_rope], dim=-1)
                 query = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+                kv_c = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
+                k_pe = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
                 kv_c_and_k_pe_cache = torch.cat([kv_c, k_pe], dim=-1)
                 kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
                     -1,
@@ -681,7 +662,7 @@ class AscendAttnBackend(AttentionBackend):
                     mla_vheadsize=self.kv_lora_rank,
                     out=attn_output,
                 )
-            return attn_output.view(num_tokens, layer.tp_q_head_num * self.kv_lora_rank)
+            return attn_output.reshape(-1, layer.tp_q_head_num * self.kv_lora_rank)
 
 
 class AscendAttnMultiStepDraftBackend:
