@@ -29,6 +29,7 @@ if is_cuda():
         deep_gemm = e
 elif is_npu():
     import torch_npu
+    import custom_ops  # noqa: F401
 
 from sglang.srt.distributed import (
     context_model_parallel_all_gather,
@@ -602,34 +603,19 @@ class Indexer(CustomOp):
             and not forward_batch.forward_mode.is_draft_extend_v2()
         )
 
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        cos = cos.repeat(1, 2).view(-1, 1, 1, self.rope_head_dim)
-        sin = sin.repeat(1, 2).view(-1, 1, 1, self.rope_head_dim)
         if is_prefill:
-            assert not (enable_index_cp and self.cp_size > 1)
-            if self.cp_size > 1:  # todo(zyj),  can split position at first
-                cos = cos.tensor_split(self.cp_size)[self.cp_rank]
-                sin = sin.tensor_split(self.cp_size)[self.cp_rank]
-            if enable_index_cp:
-                slice_length = cos.shape[0] // self.attention_tp_size
-                cos = cos[
-                    slice_length
-                    * self.attention_tp_rank : slice_length
-                    * (self.attention_tp_rank + 1)
-                ]
-                sin = sin[
-                    slice_length
-                    * self.attention_tp_rank : slice_length
-                    * (self.attention_tp_rank + 1)
-                ]
+            cos, sin = forward_batch.attn_backend.forward_metadata.cos_sin_cp
+        else:
+            cos, sin = forward_batch.attn_backend.forward_metadata.cos_sin
 
         bs = x.shape[0]
         if _use_multi_stream:
             indexer_stream = get_indexer_stream()
             indexer_stream.wait_stream(torch.npu.current_stream())
             with torch.npu.stream(indexer_stream):
-                q = self.wq_b(q_lora)[0]  # [bs, 1536] @ [1536, 64 * 128] = [bs, 64 * 128]
+                q = self.wq_b(q_lora)[
+                    0
+                ]  # [bs, 1536] @ [1536, 64 * 128] = [bs, 64 * 128]
                 wq_b_event = indexer_stream.record_event()
                 q = q.view(bs, self.n_heads, self.head_dim)  # [bs, 64, 128]
                 q_pe, q_nope = torch.split(
