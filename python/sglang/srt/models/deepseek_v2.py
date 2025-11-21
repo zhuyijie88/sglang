@@ -906,21 +906,21 @@ class DeepseekV2MoE(nn.Module):
     ) -> torch.Tensor:
         shared_output = None
         if hidden_states.shape[0] > 0:
-            # prefetch and forward share experts on the same stream
-            main_event = torch.npu.Event()
-            main_event.record()
-            cmo_stream = get_cmo_stream()
-            with torch.npu.stream(cmo_stream):
-                cmo_stream.wait_event(main_event)
-                shared_output = self._forward_shared_experts(hidden_states)
-                if _is_npu:
-                    PREFETCH_MAX_SIZE = 1000000000
-                    for weight in [self.experts.w13_weight, self.experts.w2_weight]:
-                        torch_npu.npu_prefetch(weight, shared_output, PREFETCH_MAX_SIZE)
+            if not self._fuse_shared_experts_inside_sbo:
+                # prefetch and forward share experts on the same stream
+                main_event = torch.npu.Event()
+                main_event.record()
+                cmo_stream = get_cmo_stream()
+                with torch.npu.stream(cmo_stream):
+                    cmo_stream.wait_event(main_event)
+                    shared_output = self._forward_shared_experts(hidden_states)
+                    if _is_npu:
+                        PREFETCH_MAX_SIZE = 1000000000
+                        for weight in [self.experts.w13_weight, self.experts.w2_weight]:
+                            torch_npu.npu_prefetch(weight, shared_output, PREFETCH_MAX_SIZE)
+
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
-            if not self._fuse_shared_experts_inside_sbo:
-                shared_output = self._forward_shared_experts(hidden_states)
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -1405,7 +1405,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
             )  # 1536 / 512+64
             q_lora = self.q_a_layernorm(q)
-            torch.npu.current_stream().wait_event(indexer_stream)
+            torch.npu.current_stream().wait_stream(indexer_stream)
         else:
             if self.mla_preprocess is None:
                 self.mla_preprocess = NPUMLAProlog(
@@ -2086,8 +2086,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             device=attn_output.device,
         )
 
-        if not forward_batch.forward_mode.is_decode():
+        if (
+            forward_batch.forward_mode.is_extend()
+            and not forward_batch.forward_mode.is_draft_extend_v2()
+            and not forward_batch.forward_mode.is_target_verify()
+        ):
             attn_output = attn_output.transpose(0, 1)
+            attn_output = attn_output.contiguous()
             torch.bmm(
                 attn_output,
                 self.w_vc,
@@ -2096,7 +2101,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                 ).transpose(0, 1),
             )
         else:
-            attn_output = attn_output.contiguous()
             torch.ops.npu.batch_matmul_transpose(
                 attn_output, self.w_vc, attn_bmm_output
             )
