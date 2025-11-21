@@ -586,6 +586,7 @@ class Indexer(CustomOp):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         layer_id: int,
+        dynamic_scale: torch.Tensor = None,
     ) -> torch.Tensor:
         if forward_batch.attn_backend.forward_metadata.seq_lens_cpu_int is None:
             actual_seq_lengths_kv = forward_batch.attn_backend.forward_metadata.seq_lens
@@ -613,7 +614,7 @@ class Indexer(CustomOp):
             indexer_stream = get_indexer_stream()
             indexer_stream.wait_stream(torch.npu.current_stream())
             with torch.npu.stream(indexer_stream):
-                q = self.wq_b(q_lora)[
+                q = self.wq_b(q_lora, dynamic_scale)[
                     0
                 ]  # [bs, 1536] @ [1536, 64 * 128] = [bs, 64 * 128]
                 wq_b_event = indexer_stream.record_event()
@@ -631,7 +632,9 @@ class Indexer(CustomOp):
                 q.record_stream(indexer_stream)
                 q_rope_event = indexer_stream.record_event()
         else:
-            q = self.wq_b(q_lora)[0]  # [bs, 1536] @ [1536, 64 * 128] = [bs, 64 * 128]
+            q = self.wq_b(q_lora, dynamic_scale)[
+                0
+            ]  # [bs, 1536] @ [1536, 64 * 128] = [bs, 64 * 128]
             q = q.view(bs, self.n_heads, self.head_dim)  # [bs, 64, 128]
             q_pe, q_nope = torch.split(
                 q,

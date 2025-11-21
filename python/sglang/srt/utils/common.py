@@ -596,6 +596,7 @@ cmo_stream = None
 indexer_stream = None
 indexer_weight_stream = None
 
+
 def get_cmo_stream(device="cuda"):
     """
     Cache Management Operation(CMO).
@@ -609,6 +610,7 @@ def get_cmo_stream(device="cuda"):
         cmo_stream = torch.get_device_module(device).Stream()
     return cmo_stream
 
+
 def get_indexer_weight_stream(device="cuda"):
     if is_npu():
         device = "npu"
@@ -617,6 +619,7 @@ def get_indexer_weight_stream(device="cuda"):
         indexer_weight_stream = torch.get_device_module(device).Stream()
     return indexer_weight_stream
 
+
 def get_indexer_stream(device="cuda"):
     if is_npu():
         device = "npu"
@@ -624,6 +627,7 @@ def get_indexer_stream(device="cuda"):
     if indexer_stream is None:
         indexer_stream = torch.get_device_module(device).Stream()
     return indexer_stream
+
 
 def prepare_weight_cache(handle, cache):
     import torch_npu
