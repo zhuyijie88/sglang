@@ -2086,8 +2086,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             device=attn_output.device,
         )
 
-        if not forward_batch.forward_mode.is_decode():
+        if (
+            forward_batch.forward_mode.is_extend()
+            and not forward_batch.forward_mode.is_draft_extend_v2()
+            and not forward_batch.forward_mode.is_target_verify()
+        ):
             attn_output = attn_output.transpose(0, 1)
+            attn_output = attn_output.contiguous()
             torch.bmm(
                 attn_output,
                 self.w_vc,
@@ -2096,7 +2101,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                 ).transpose(0, 1),
             )
         else:
-            attn_output = attn_output.contiguous()
             torch.ops.npu.batch_matmul_transpose(
                 attn_output, self.w_vc, attn_bmm_output
             )
