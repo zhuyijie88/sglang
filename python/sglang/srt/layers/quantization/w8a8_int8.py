@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import numpy as np
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple, Union, cast
 
@@ -306,8 +307,10 @@ class W8A8Int8Config(QuantizationConfig):
                     proj_name, packed_modules_mapping_subset[proj_name][0]
                 )
             self.is_dynamic = (
-                self.quant_description[prefix_in_quant_config + ".weight"]
+                self.quant_description.get(prefix_in_quant_config + ".weight", "")
                 == "W8A8_DYNAMIC"
+                or self.quant_description.get("quant_method", "")
+                == "compressed-tensors"
             )
             if self.is_layer_skipped(prefix, packed_modules_mapping_subset):
                 return UnquantizedLinearMethod()
@@ -325,7 +328,8 @@ class W8A8Int8Config(QuantizationConfig):
             if (
                 self.is_moe_w4_dynamic and self.is_moe_input_quant is not None
             ) or is_moe_w4a8_dynamic:
-                raise ValueError("npu does not support W4A8 currently!")
+                # raise ValueError("npu does not support W4A8 currently!")
+                return NPU_W4A8MoEMethod(self, have_alpha=self.is_moe_w4_dynamic)
             elif self.is_moe_w4_dynamic and self.is_moe_input_quant is None:
                 return NPU_W4A16MoEMethod(self)
             else:
@@ -367,7 +371,7 @@ class W8A8Int8Config(QuantizationConfig):
             is_skipped = None
             for shard_prefix in shard_prefixes:
                 is_shard_skipped = (
-                    self.quant_description[shard_prefix + ".weight"] == "FLOAT"
+                    self.quant_description.get(shard_prefix + ".weight", "") == "FLOAT"
                 )
 
                 if is_skipped is None:
@@ -379,7 +383,7 @@ class W8A8Int8Config(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = self.quant_description[prefix + ".weight"] == "FLOAT"
+            is_skipped = self.quant_description.get(prefix + ".weight", "") == "FLOAT"
 
         assert is_skipped is not None
         return is_skipped
@@ -1167,6 +1171,412 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
             group_list=group_list,
             output_dtype=output_dtype,
         )[0]
+        return hidden_states
+
+
+class NPU_W4A8MoEMethod(FusedMoEMethodBase):
+    """MoE method for NPU quantization.
+
+    This class search for specific quantization
+    implementations supported on NPU hardware for moe methods.
+
+    Args:
+        quant_config: The NPU quantization config.
+    """
+
+    def __init__(self, quantization_config: W8A8Int8Config, have_alpha: bool) -> None:
+        self.quantization_config = quantization_config
+        self.quant_method = self
+        self.pack_factor = 2  # weight dtype is int4,  but use int8 to create
+        self.have_alpha = have_alpha
+        if not self.have_alpha:
+            if "MoEGMM" in quantization_config.target_scheme_map:
+                self.group_size = quantization_config.target_scheme_map["MoEGMM"].get(
+                    "group_size", 256
+                )
+            else:
+                self.group_size = 256
+        logger.warning_once("NPU_W4A8MoEMethod !!!")
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
+
+        self.num_experts = num_experts
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+        )
+
+        # weight
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition // self.pack_factor,
+                hidden_size,
+                dtype=torch.int8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size // self.pack_factor,
+                intermediate_size_per_partition,
+                dtype=torch.int8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # scale
+        if self.have_alpha:
+            weight_scale_dtype = torch.int64
+        else:
+            weight_scale_dtype = torch.float32
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                1,
+                dtype=weight_scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(num_experts, hidden_size, 1, dtype=weight_scale_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # offset
+        w13_weight_offset = torch.nn.Parameter(
+            torch.empty(
+                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_offset", w13_weight_offset)
+        set_weight_attrs(w13_weight_offset, extra_weight_attrs)
+
+        w2_weight_offset = torch.nn.Parameter(
+            torch.empty(num_experts, hidden_size, 1, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_offset", w2_weight_offset)
+        set_weight_attrs(w2_weight_offset, extra_weight_attrs)
+
+        # >>> special param for w4a8
+        if self.have_alpha:
+            w13_bias_name = "w13_bias"
+            w2_bias_name = "w2_bias"
+            w13_bias = torch.nn.Parameter(
+                torch.ones(
+                    num_experts, 2 * intermediate_size_per_partition, dtype=torch.float
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.ones(num_experts, hidden_size, dtype=torch.float),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+            w2_alpha = torch.nn.Parameter(
+                torch.ones(num_experts, dtype=torch.float), requires_grad=False
+            )
+            layer.register_parameter("w2_alpha", w2_alpha)
+            set_weight_attrs(w2_alpha, extra_weight_attrs)
+        else:
+            w13_bias_name = "w13_scale_bias"
+            w2_bias_name = "w2_scale_bias"
+            self.w2_alpha = None
+            w13_weight_scale_second = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    hidden_size // self.group_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_scale_second", w13_weight_scale_second)
+            set_weight_attrs(w13_weight_scale_second, extra_weight_attrs)
+            w13_weight_offset_second = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    hidden_size // self.group_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter(
+                "w13_weight_offset_second", w13_weight_offset_second
+            )
+            set_weight_attrs(w13_weight_offset_second, extra_weight_attrs)
+
+            w2_weight_scale_second = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // self.group_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_scale_second", w2_weight_scale_second)
+            set_weight_attrs(w2_weight_scale_second, extra_weight_attrs)
+
+            w2_weight_offset_second = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // self.group_size,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_offset_second", w2_weight_offset_second)
+            set_weight_attrs(w2_weight_offset_second, extra_weight_attrs)
+
+            w13_scale_bias = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    1,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_scale_bias", w13_scale_bias)
+            set_weight_attrs(w13_scale_bias, extra_weight_attrs)
+            tp_size = 1  # only support EP, do not support expert tp
+            w2_scale_bias = torch.nn.Parameter(
+                torch.empty(
+                    num_experts, hidden_size, 16 // tp_size, dtype=torch.float32
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_scale_bias", w2_scale_bias)
+            set_weight_attrs(w2_scale_bias, extra_weight_attrs)
+
+    def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
+        scale = scale.transpose(1, 2).contiguous()
+        per_group_scale = per_group_scale.transpose(1, 2).contiguous()
+        group_num, k, n = weight.shape
+        # the weight of the new version is reduced by half by pack n, so it needs to be restored
+        n = n * 2
+        per_group_scale = per_group_scale.reshape(group_num, -1, n)
+        group_num, quantgroup_num, n = per_group_scale.shape
+
+        scale_fp32 = (scale * per_group_scale).to(torch.float16).to(torch.float32)
+        scale_fp32_np = scale_fp32.cpu().numpy()
+        scale_fp32_np.dtype = np.uint32
+        sscale_uint64 = np.zeros((group_num, quantgroup_num, n * 2), dtype=np.uint32)
+
+        sscale_uint64[..., ::2] = scale_fp32_np
+
+        sscale_uint64_buffer = np.frombuffer(
+            sscale_uint64.tobytes(), dtype=np.int64
+        ).copy()
+        sscale_uint64_tensor = torch.from_numpy(sscale_uint64_buffer).reshape(
+            group_num, quantgroup_num, n
+        )
+        sscale_uint64_tensor = sscale_uint64_tensor.npu()
+        return sscale_uint64_tensor
+
+    def pack_to_int32(self, weight: torch.Tensor):
+        # pack 4 int8(int4*2) to int32, because in pytorch, we need to use int32 to represent int4
+        assert (
+            weight.shape[-1] % 4 == 0
+        ), "the last dim of weight needs to be divided by 4"
+        return weight.view(torch.int32).contiguous()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(layer, "w13_weight_scale_second"):
+            w13_weight_scale_second = (
+                layer.w13_weight_scale_second.data
+                if hasattr(layer, "w13_weight_scale_second")
+                else None
+            )
+            w2_weight_scale_second = (
+                layer.w2_weight_scale_second.data
+                if hasattr(layer, "w2_weight_scale_second")
+                else None
+            )
+            layer.w13_weight_scale.data = self.process_scale(
+                layer.w13_weight, layer.w13_weight_scale.data, w13_weight_scale_second
+            )
+            layer.w2_weight_scale.data = self.process_scale(
+                layer.w2_weight, layer.w2_weight_scale.data, w2_weight_scale_second
+            )
+            layer.w13_scale_bias.data = (
+                layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+            )
+            layer.w2_scale_bias.data = (
+                layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+            )
+            # scale_second is no longer used, release this part of the memory
+            del layer.w13_weight_scale_second
+            del layer.w2_weight_scale_second
+            del layer.w13_weight_offset_second
+            del layer.w2_weight_offset_second
+        else:
+            w13_weight_scale = (
+                layer.w13_weight_scale.data.squeeze(-1).contiguous().unsqueeze(1)
+            )
+            w2_weight_scale = (
+                layer.w2_weight_scale.data.squeeze(-1).contiguous().unsqueeze(1)
+            )
+            layer.w13_weight_scale = Parameter(w13_weight_scale, requires_grad=False)
+            layer.w2_weight_scale = Parameter(w2_weight_scale, requires_grad=False)
+
+        w13_weight = layer.w13_weight.data.transpose(1, 2).contiguous()
+        w2_weight = layer.w2_weight.data.transpose(1, 2).contiguous()
+        is_enable_nz = False  # todo
+        if is_enable_nz:
+            w13_weight = torch_npu.npu_format_cast(w13_weight, 29)
+            w2_weight = torch_npu.npu_format_cast(w2_weight, 29)
+        w13_weight = self.pack_to_int32(w13_weight)
+        w2_weight = self.pack_to_int32(w2_weight)
+        layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+
+        layer.w13_weight_offset = Parameter(
+            layer.w13_weight_offset.data.squeeze(-1).contiguous(), requires_grad=False
+        )
+        layer.w2_weight_offset = Parameter(
+            layer.w2_weight_offset.data.squeeze(-1).contiguous(), requires_grad=False
+        )
+
+    def create_moe_runner(
+        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+    ):
+        self.moe_runner_config = moe_runner_config
+
+    def apply(
+        self,
+        layer,
+        dispatch_output: StandardDispatchOutput,
+    ) -> CombineInput:
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+
+        topk_weights, topk_ids, _ = topk_output
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = topk_weights.to(x.dtype)
+        output = npu_fused_experts(
+            hidden_states=x,
+            w13=layer.w13_weight,
+            w13_scale=layer.w13_weight_scale,
+            w2=layer.w2_weight,
+            w2_scale=layer.w2_weight_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=topk_ids.shape[1],
+        )
+        return StandardCombineInput(hidden_states=output)
+
+    def apply_without_routing_weights(
+        self,
+        layer,
+        hidden_states,
+        hidden_states_scale,
+        group_list_type,
+        group_list,
+        output_dtype,
+    ):
+        if hidden_states_scale is None:
+            # gmm1: gate_up_proj
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=[layer.w13_weight],
+                antiquant_scale=[layer.w13_weight_scale],
+                antiquant_offset=[layer.w13_weight_offset],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=output_dtype,
+            )[0]
+
+            # act_fn: swiglu
+            hidden_states = torch_npu.npu_swiglu(hidden_states)
+
+            # gmm2: down_proj
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=[layer.w2_weight],
+                antiquant_scale=[layer.w2_weight_scale],
+                antiquant_offset=[layer.w2_weight_offset],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=output_dtype,
+            )[0]
+        else:
+            mm1_mm3 = torch_npu.npu_grouped_matmul(
+                [hidden_states],
+                [layer.w13_weight],
+                bias=[layer.w13_bias],
+                scale=[layer.w13_weight_scale],
+                per_token_scale=[hidden_states_scale],
+                group_list=group_list,
+                split_item=3,
+                output_dtype=output_dtype,
+                group_type=0,
+                group_list_type=group_list_type,
+                act_type=0,
+            )[0]
+            if layer.w2_alpha is not None:
+                intermediate_h, pertoken_scale = torch_npu.npu_swiglu_clip_quant(
+                    mm1_mm3,
+                    group_list,
+                    layer.w2_alpha,
+                    activate_left=True,
+                    quant_mode=1,
+                    clamp_mode=1,
+                )
+            else:
+                from sgl_kernel_npu.activation.swiglu_quant import swiglu_quant
+
+                intermediate_h, pertoken_scale = swiglu_quant(
+                    hidden_states, group_list, group_list_type
+                )
+
+            hidden_states = torch_npu.npu_grouped_matmul(
+                [intermediate_h],
+                [layer.w2_weight],
+                bias=[layer.w2_bias],
+                scale=[layer.w2_weight_scale],
+                per_token_scale=[pertoken_scale],
+                group_list=group_list,
+                split_item=3,
+                output_dtype=output_dtype,
+                group_type=0,
+                group_list_type=group_list_type,
+                act_type=0,
+            )[0]
+
         return hidden_states
 
 

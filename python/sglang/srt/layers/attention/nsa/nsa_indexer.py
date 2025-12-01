@@ -1015,6 +1015,10 @@ class Indexer(CustomOp):
             block_table[: actual_seq_lengths_q.size()[0]] if is_prefill else block_table
         )
 
+        # weights.dtype=torch.float32, weights.shape=torch.Size([16, 64])
+        # 转回bf16 临时跳过
+        weights = weights.to(torch.bfloat16)
+
         topk_indices = torch.ops.custom.npu_lightning_indexer(
             query=q.view(-1, self.n_heads, self.head_dim),
             key=past_key_states,
