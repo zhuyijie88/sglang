@@ -787,6 +787,17 @@ class FusedMoE(torch.nn.Module):
             )
             return
 
+        if "bias" in weight_name or "alpha" in weight_name:
+            if expert_data.dim() == 0:
+                expert_data = param.data[None, expert_id]
+            self._load_per_channel_weight_scale(
+                shard_id=shard_id,
+                shard_dim=shard_dim,
+                loaded_weight=loaded_weight,
+                expert_data=expert_data,
+                tp_rank=tp_rank,
+            )
+
         # Case model weights
         if "weight" in weight_name:
             self._load_model_weight_or_group_weight_scale(
