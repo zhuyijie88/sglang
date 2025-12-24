@@ -1342,9 +1342,12 @@ class HybridLinearAttnBackend(AttentionBackend):
                 :request_number
             ]
         )
-        intermediate_state_indices = torch.arange(
-            request_number, dtype=torch.int32, device=state_indices_tensor.device
-        )
+        if is_npu():
+            intermediate_state_indices = state_indices_tensor
+        else:
+            intermediate_state_indices = torch.arange(
+                request_number, dtype=torch.int32, device=state_indices_tensor.device
+            )
 
         mamba_caches = (
             self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()

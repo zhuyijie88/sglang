@@ -785,7 +785,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
             else:
                 max_relative_indices_per_req = accept_length - 1
             self.target_worker.model_runner.attn_backend.update_mamba_state_after_mtp_verify(
-                max_relative_indices_per_req, self.target_worker.model_runner.model
+                max_relative_indices_per_req,
+                None,
+                None,
+                self.target_worker.model_runner.model,
             )
 
         return GenerationBatchResult(
