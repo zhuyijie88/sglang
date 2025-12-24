@@ -92,7 +92,6 @@ class NPUGraphRunner(CudaGraphRunner):
             AttentionArch.MLA: [],
             AttentionArch.MHA: torch.Tensor(),
         }
-        self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
 
     def _create_device_graph(self):
         return torch.npu.NPUGraph()

@@ -386,12 +386,17 @@ class AscendAttnBackend(AttentionBackend):
 
         metadata.block_tables = self.graph_metadata["block_tables"][:bs, :]
         metadata.seq_lens_cpu_list = seq_lens.cpu().int().tolist()
+        metadata.seq_lens_cpu_int = seq_lens.cpu().int()
+
+        if forward_mode.is_target_verify():
+            metadata.seq_lens_cpu_int += self.speculative_num_draft_tokens
         metadata.seq_lens = seq_lens
         if (
             forward_mode.is_target_verify()
             or forward_mode.is_draft_extend_v2()
             or forward_mode.is_draft_extend()
         ):
+            metadata.actual_seq_lengths_kv = metadata.seq_lens_cpu_int.tolist()
             metadata.actual_seq_lengths_q = torch.arange(
                 self.speculative_num_draft_tokens,
                 self.speculative_num_draft_tokens
@@ -437,6 +442,12 @@ class AscendAttnBackend(AttentionBackend):
         metadata.block_tables[bs:, :].fill_(0)
         if forward_mode.is_target_verify():
             seq_lens = seq_lens + self.speculative_num_draft_tokens
+        if (
+            forward_mode.is_target_verify()
+            or forward_mode.is_draft_extend_v2()
+            or forward_mode.is_draft_extend()
+        ):
+            metadata.actual_seq_lengths_kv = seq_lens.cpu().int().tolist()
         metadata.seq_lens[:bs].copy_(seq_lens[:bs])
 
         self.forward_metadata = metadata
@@ -938,38 +949,62 @@ class AscendAttnBackend(AttentionBackend):
             if not self.graph_mode:
                 num_token_padding = query.shape[0]
                 query = query[: forward_batch.num_token_non_padded_cpu]
-            if self.forward_metadata.seq_lens_cpu_int is None:
-                actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
+            if layer.qk_head_dim == 256:
+                if forward_batch.extend_seq_lens_cpu is not None:
+                    bsz = len(forward_batch.extend_prefix_lens_cpu)
+                    query = query.view(bsz, -1, layer.tp_q_head_num, layer.qk_head_dim)
+                else:
+                    q_len = forward_batch.spec_info.draft_token_num
+                    query = query.view(
+                        -1, q_len, layer.tp_q_head_num, layer.qk_head_dim
+                    )
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query,
+                    k_cache,
+                    v_cache,
+                    block_table=self.forward_metadata.block_tables,
+                    block_size=self.page_size,
+                    num_heads=layer.tp_q_head_num,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="BSND",
+                    atten_mask=self.mtp_mask,
+                    scale=layer.scaling,
+                    actual_seq_lengths_kv=self.forward_metadata.actual_seq_lengths_kv,
+                    sparse_mode=3,
+                )
             else:
-                actual_seq_lengths_kv = (
-                    self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
-                )
-            if forward_batch.forward_mode.is_draft_extend():
-                actual_seq_lengths = (
-                    np.array(forward_batch.extend_seq_lens_cpu).cumsum().tolist()
-                )
-            else:
-                actual_seq_lengths = np.arange(
-                    self.speculative_num_draft_tokens,
-                    self.speculative_num_draft_tokens + query.shape[0],
-                    self.speculative_num_draft_tokens,
-                )
+                if self.forward_metadata.seq_lens_cpu_int is None:
+                    actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
+                else:
+                    actual_seq_lengths_kv = (
+                        self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
+                    )
+                if forward_batch.forward_mode.is_draft_extend():
+                    actual_seq_lengths = (
+                        np.array(forward_batch.extend_seq_lens_cpu).cumsum().tolist()
+                    )
+                else:
+                    actual_seq_lengths = np.arange(
+                        self.speculative_num_draft_tokens,
+                        self.speculative_num_draft_tokens + query.shape[0],
+                        self.speculative_num_draft_tokens,
+                    )
 
-            attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                query,
-                k_cache,
-                v_cache,
-                block_table=self.forward_metadata.block_tables,
-                block_size=self.page_size,
-                num_heads=layer.tp_q_head_num,
-                num_key_value_heads=layer.tp_k_head_num,
-                input_layout="TND",
-                atten_mask=self.mtp_mask,
-                scale=layer.scaling,
-                actual_seq_lengths=actual_seq_lengths,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                sparse_mode=3,
-            )
+                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                    query,
+                    k_cache,
+                    v_cache,
+                    block_table=self.forward_metadata.block_tables,
+                    block_size=self.page_size,
+                    num_heads=layer.tp_q_head_num,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="TND",
+                    atten_mask=self.mtp_mask,
+                    scale=layer.scaling,
+                    actual_seq_lengths=actual_seq_lengths,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    sparse_mode=3,
+                )
             attn_output = attn_output.view(-1, layer.tp_q_head_num * layer.v_head_dim)
             if (
                 not self.graph_mode
@@ -1025,6 +1060,7 @@ class AscendAttnBackend(AttentionBackend):
                     self.speculative_num_draft_tokens + q_nope.shape[0],
                     self.speculative_num_draft_tokens,
                 )
+
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 q_nope,
                 c_kv_cache,
@@ -1801,9 +1837,9 @@ class AscendGDNAttnBackend(MambaAttnBackendBase):
         seq_len = query.shape[0]
         num_heads = query.shape[1] // head_k_dim
         num_value_heads = value.shape[1] // head_v_dim
-        g, beta = fused_gdn_gating_v3(A_log, a, b, dt_bias)
 
         if self.enable_ascendc_fusion_gdn:
+            g, beta = fused_gdn_gating_v3(A_log, a, b, dt_bias)
             query = query.view(-1, num_heads, head_k_dim)
             key = key.view(-1, num_heads, head_k_dim)
             value = value.view(-1, num_value_heads, head_v_dim)
