@@ -385,6 +385,7 @@ class AscendAttnBackend(AttentionBackend):
         metadata = ForwardMetadata()
 
         metadata.block_tables = self.graph_metadata["block_tables"][:bs, :]
+        metadata.block_tables.zero_()
         metadata.seq_lens_cpu_list = seq_lens.cpu().int().tolist()
         metadata.seq_lens_cpu_int = seq_lens.cpu().int()
 
@@ -397,6 +398,7 @@ class AscendAttnBackend(AttentionBackend):
             or forward_mode.is_draft_extend()
         ):
             metadata.actual_seq_lengths_kv = metadata.seq_lens_cpu_int.tolist()
+            metadata.seq_lens_cpu_list = metadata.seq_lens_cpu_int.tolist()
             metadata.actual_seq_lengths_q = torch.arange(
                 self.speculative_num_draft_tokens,
                 self.speculative_num_draft_tokens
@@ -442,14 +444,14 @@ class AscendAttnBackend(AttentionBackend):
         metadata.block_tables[bs:, :].fill_(0)
         if forward_mode.is_target_verify():
             seq_lens = seq_lens + self.speculative_num_draft_tokens
-        if (
-            forward_mode.is_target_verify()
-            or forward_mode.is_draft_extend_v2()
-            or forward_mode.is_draft_extend()
-        ):
-            metadata.actual_seq_lengths_kv = seq_lens.cpu().int().tolist()
+        # if (
+        #     forward_mode.is_target_verify()
+        #     or forward_mode.is_draft_extend_v2()
+        #     or forward_mode.is_draft_extend()
+        # ):
+        #     metadata.actual_seq_lengths_kv = seq_lens.cpu().int().tolist()
         metadata.seq_lens[:bs].copy_(seq_lens[:bs])
-
+        metadata.seq_lens_cpu_list = metadata.seq_lens.cpu().int().tolist()
         self.forward_metadata = metadata
 
         self.graph_mode = True
@@ -949,7 +951,7 @@ class AscendAttnBackend(AttentionBackend):
             if not self.graph_mode:
                 num_token_padding = query.shape[0]
                 query = query[: forward_batch.num_token_non_padded_cpu]
-            if layer.qk_head_dim == 256:
+            if False and layer.qk_head_dim == 256:
                 if forward_batch.extend_seq_lens_cpu is not None:
                     bsz = len(forward_batch.extend_prefix_lens_cpu)
                     query = query.view(bsz, -1, layer.tp_q_head_num, layer.qk_head_dim)
